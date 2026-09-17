@@ -1,0 +1,77 @@
+# Live system base (apt recommends are disabled, so list explicitly)
+live-boot
+live-config
+live-config-systemd
+systemd-sysv
+systemd-timesyncd
+udev
+kmod
+locales
+kbd
+
+# CPU microcode (test with the same microcode production will load)
+amd64-microcode
+intel-microcode
+
+# Test orchestrator
+python3
+
+# Stress tools
+stress-ng
+stressapptest
+memtester
+fio
+iperf3
+
+# Hardware error reporting / telemetry
+rasdaemon
+edac-utils
+lm-sensors
+ipmitool
+linux-cpupower
+msr-tools
+cpuid
+i2c-tools
+numactl
+hwloc-nox
+
+# Inventory
+dmidecode
+pciutils
+usbutils
+lshw
+lsscsi
+efibootmgr
+
+# Storage
+smartmontools
+nvme-cli
+hdparm
+sdparm
+sg3-utils
+util-linux
+fdisk
+gdisk
+parted
+dosfstools
+exfatprogs
+e2fsprogs
+
+# Network
+ethtool
+iproute2
+iputils-ping
+ca-certificates
+curl
+
+# Operator convenience
+less
+vim-tiny
+nano
+procps
+psmisc
+htop
+tmux
+jq
+zstd
+sysstat

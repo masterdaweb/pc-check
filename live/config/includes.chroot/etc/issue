@@ -1,0 +1,3 @@
+Master da Web PC-Check hardware burn-in - \l
+The test runs on tty1 (Alt+F1). Commands: pccheck status | pccheck abort
+

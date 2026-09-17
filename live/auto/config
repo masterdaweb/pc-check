@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+# Kernel command line shared by every boot entry.
+#  - panic/softlockup/hardlockup: turn hangs into panics -> reboot, so a hang is
+#    detected on the next boot (and the panic log is kept in pstore/ERST).
+#  - efi_pstore: keep kernel crash logs in UEFI NVRAM across the reboot.
+# #  - console: kernel messages on serial (IPMI SOL) and on the screen (tty0 last = primary).
+APPEND="boot=live components hostname=pccheck live-config.noautologin \
+quiet loglevel=3 \
+panic=10 nmi_watchdog=1 softlockup_panic=1 hardlockup_panic=1 \
+efi_pstore.pstore_disable=0 printk.devkmsg=on \
+console=ttyS0,115200n8 console=tty0"
+
+lb config noauto \
+	--mode debian \
+	--distribution trixie \
+	--architectures amd64 \
+	--linux-flavours amd64 \
+	--archive-areas "main contrib non-free non-free-firmware" \
+	--binary-images iso-hybrid \
+	--bootloaders "grub-pc grub-efi" \
+	--debian-installer none \
+	--memtest memtest86+ \
+	--firmware-chroot true \
+	--firmware-binary false \
+	--apt-recommends false \
+	--security true \
+	--updates true \
+	--cache-packages true \
+	--chroot-squashfs-compression-type zstd \
+	--iso-volume "PCCHECK_LIVE" \
+	--iso-application "Master da Web PC-Check hardware burn-in" \
+	--iso-publisher "Master da Web" \
+	--bootappend-live "${APPEND}" \
+	--bootappend-live-failsafe none \
+	"${@}"

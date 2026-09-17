@@ -1,0 +1,43 @@
+# PC-Check fleet configuration.
+# Copy to the root of the PCCHECKDATA partition as "pccheck.conf".
+# Options given on the kernel command line (boot menu) take precedence.
+
+# Profile used by the default boot entry: quick (1h), standard (12h), extended (24h), burnin (72h)
+profile = standard
+
+# Custom total stress time in hours (overrides the profile's duration)
+#hours = 36
+
+# Phases to skip (comma separated): cpu, memory, mprime, transient, idle, combined
+#skip =
+
+# Destructive fio write+verify on non-boot disks: 0, 1 (only disks without partitions/filesystems), force
+destructive = 0
+destructive_countdown = 120
+
+# Failure thresholds (number of events during the test that turn a warning into a FAIL)
+ce_fail = 1          # corrected ECC memory errors per DIMM
+mce_fail = 1         # corrected machine checks
+aer_fail = 20        # corrected PCIe errors per device
+max_unexpected_reboots = 3
+
+# Temperature warning levels used only when a sensor reports no limits
+cpu_temp_warn = 90
+drive_temp_warn = 70
+
+# Serve reports and live status on http://<machine-ip>/ (status.json for automation)
+http = 1
+
+# Turn on the chassis identify LED (IPMI) when the verdict is FAIL
+identify = 1
+
+# Planned reboot / power-cycle stability test at the end of the run.
+# Many machines that "randomly reboot" actually fail on the way up: a DIMM that is not
+# trained, a core left disabled, a disk or NIC that disappears. Each cycle compares the
+# hardware inventory with the one taken at the start. Recommended for new servers: 5.
+reboot_cycles = 0
+# auto = cold power cycle through the BMC when there is one, otherwise a warm reboot
+reboot_method = auto
+
+# Optional iperf3 server to load the network during the combined phase
+#iperf3 = 10.0.0.10

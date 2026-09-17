@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+# Test orchestrator runs on tty1 instead of a login prompt.
+systemctl enable pccheck.service
+systemctl mask getty@tty1.service autovt@tty1.service
+
+systemctl enable systemd-networkd.service
+systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true
+systemctl mask systemd-networkd-wait-online.service
+
+# PC-Check collects pstore (kernel crash logs) itself and stores them on the USB stick.
+systemctl mask systemd-pstore.service
+
+# rasdaemon decodes and records RAS events (MCE, EDAC, AER).
+systemctl enable rasdaemon.service 2>/dev/null || true
+
+# Services we do not want competing for resources during a burn-in.
+for unit in sysstat.service iperf3.service apt-daily.timer apt-daily-upgrade.timer e2scrub_all.timer fstrim.timer man-db.timer; do
+	systemctl disable "$unit" 2>/dev/null || true
+done
+
+chmod 0755 /usr/local/bin/pccheck
+python3 -m compileall -q /opt/pccheck || true
+
+# Root has no password; logins are only possible on the local console / serial port.
+passwd -d root

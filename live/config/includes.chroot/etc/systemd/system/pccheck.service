@@ -1,0 +1,29 @@
+[Unit]
+Description=Master da Web PC-Check automatic hardware burn-in
+After=systemd-udev-settle.service systemd-modules-load.service live-config.service local-fs.target
+Wants=systemd-udev-settle.service
+Conflicts=getty@tty1.service
+Before=getty.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/pccheck PYTHONUNBUFFERED=1 TERM=linux
+ExecStartPre=-/usr/bin/chvt 1
+ExecStart=/usr/bin/python3 -m pccheck run
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=on-failure
+RestartSec=5
+# The orchestrator must keep running (and petting the watchdog) while stress
+# tools saturate every CPU; stress tools are started with nice 19.
+Nice=-10
+OOMScoreAdjust=-900
+KillMode=control-group
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

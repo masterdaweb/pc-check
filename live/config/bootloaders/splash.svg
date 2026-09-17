@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a1c33"/>
+      <stop offset="60%" stop-color="#0b2444"/>
+      <stop offset="100%" stop-color="#071426"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="600" fill="url(#bg)"/>
+  <rect x="0" y="0" width="800" height="6" fill="#2f7fd1"/>
+  <g font-family="DejaVu Sans" text-anchor="middle">
+    <text x="400" y="62" fill="#7fb3e8" font-size="20" letter-spacing="6">MASTER DA WEB</text>
+    <text x="400" y="112" fill="#ffffff" font-size="44" font-weight="bold" letter-spacing="2">PC-CHECK</text>
+    <text x="400" y="140" fill="#9fb3d1" font-size="16">hardware burn-in and diagnosis</text>
+  </g>
+  <rect x="150" y="160" width="500" height="1" fill="#25456e"/>
+  <g font-family="DejaVu Sans" text-anchor="middle" fill="#6f87a8" font-size="13">
+    <text x="400" y="470">The machine is tested automatically; the result is shown on screen when it finishes.</text>
+    <text x="400" y="492">Reports are written to the PCCHECKDATA partition of this USB stick.</text>
+  </g>
+</svg>

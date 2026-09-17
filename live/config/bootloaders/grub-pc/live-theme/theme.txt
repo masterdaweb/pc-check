@@ -1,0 +1,60 @@
+desktop-image: "../splash.png"
+desktop-color: "#0b1f3a"
+title-text: ""
+title-color: "#ffffff"
+title-font: "Unifont Regular 16"
+message-font: "Unifont Regular 16"
+terminal-font: "Unifont Regular 16"
+
++ label {
+        top = 29%
+        left = 0
+        width = 100%
+        height = 20
+        text = "Select a test profile (the highlighted entry starts automatically)"
+        align = "center"
+        color = "#9fb3d1"
+        font = "Unifont Regular 16"
+}
+
++ boot_menu {
+        left = 12%
+        width = 76%
+        top = 34%
+        height = 42%
+        item_color = "#c8d3e6"
+        item_font = "Unifont Regular 16"
+        selected_item_color = "#ffffff"
+        selected_item_font = "Unifont Regular 16"
+        item_height = 16
+        item_padding = 2
+        item_spacing = 6
+        icon_width = 0
+        icon_height = 0
+        item_icon_space = 0
+}
+
++ progress_bar {
+        id = "__timeout__"
+        left = 15%
+        top = 100%-80
+        height = 16
+        width = 70%
+        font = "Unifont Regular 16"
+        text_color = "#000000"
+        fg_color = "#ffffff"
+        bg_color = "#5a6f8f"
+        border_color = "#ffffff"
+        text = "@TIMEOUT_NOTIFICATION_LONG@"
+}
+
++ label {
+        top = 100%-50
+        left = 0
+        width = 100%
+        height = 20
+        text = "@KEYMAP_SHORT@"
+        align = "center"
+        color = "#9fb3d1"
+        font = "Unifont Regular 16"
+}
