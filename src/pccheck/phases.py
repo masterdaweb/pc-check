@@ -1,7 +1,7 @@
 """Stress phases. Each phase gets a time budget and reports problems through ctx.findings.
 
 Design notes (why this catches what simple burn-in tools miss):
- * Every workload verifies its own results (stress-ng --verify, stressapptest data checks,
+ * Workloads request result verification where supported (stress-ng --verify, stressapptest data checks,
    Prime95 FFT round-off checks). Silent miscalculation is the classic sign of a marginal CPU/RAM.
  * Hardware error reporting (MCE, EDAC, AER, BMC SEL) is monitored the whole time, so corrected
    errors - the early warning that precedes crashes - fail the machine even when no test fails.
@@ -20,7 +20,7 @@ import time
 
 from .findings import FAIL, INFO, WARN
 from .kmsg import REC_CPU_MEM, REC_MEMORY
-from .util import ManagedProcess, cpu_count, have, meminfo, read_file
+from .util import ManagedProcess, cpu_count, have, meminfo, read_file, load_json
 
 log = logging.getLogger("pccheck")
 
@@ -61,7 +61,10 @@ def mem_budget_mib(fraction):
     avail = mi.get("MemAvailable", 0)
     total = mi.get("MemTotal", 0)
     reserve = max(768 * 2**20, int(total * 0.04))
-    return max(64, int((avail - reserve) * fraction) // 2**20)
+    budget = int(max(0, avail - reserve) * fraction) // 2**20
+    if budget < 64:
+        raise RuntimeError("Insufficient available RAM for a verified workload plus the OS reserve")
+    return budget
 
 
 class Phase:
@@ -109,6 +112,9 @@ class Phase:
             return None
         proc.close()
         self.check_stressng(label, rc, proc.output_tail())
+        if rc == 0 and time.monotonic() - proc.started < seconds * 0.9 and not self.stopped():
+            self.ctx.findings.add(f"stressng-short:{self.name}:{label}", WARN, "Test",
+                                  f"stress-ng '{label}' ended before its allotted test time", incomplete=True)
         return rc
 
     def check_stressng(self, label, rc, output):
@@ -120,9 +126,12 @@ class Phase:
                                   detail="A stress workload produced wrong results or crashed. This is the typical "
                                          "symptom of an unstable CPU, memory, VRM or overclock/XMP settings.",
                                   recommendation=REC_CPU_MEM, evidence=fail_lines[-15:] or [f"exit code {rc}"])
-        elif rc not in (0, 3, 4, None):
+        elif rc == 4:
+            self.ctx.findings.add(f"stressng-unsupported:{label}", WARN, "Test",
+                                  f"stress-ng '{label}' is unsupported on this platform")
+        elif rc != 0 or "successful run completed" not in output:
             self.ctx.findings.add(f"stressng-rc:{label}", WARN, "Test",
-                                  f"stress-ng '{label}' exited with code {rc}",
+                                  f"stress-ng '{label}' did not complete successfully (code {rc})", incomplete=True,
                                   evidence=[l for l in output.splitlines() if "error" in l.lower()][-10:])
 
 
@@ -132,10 +141,17 @@ class CpuPhase(Phase):
     def run(self):
         slice_s = min(600, max(45, self.duration / len(CPU_STRESSORS)))
         i = 0
+        stressors = list(CPU_STRESSORS)
         while self.remaining > 20 and not self.stopped():
-            label, args = CPU_STRESSORS[i % len(CPU_STRESSORS)]
+            if not stressors:
+                self.ctx.findings.add("cpu-no-workloads", WARN, "Test",
+                                      "No CPU stress workloads could run", incomplete=True)
+                break
+            label, args = stressors[i % len(stressors)]
             self.ctx.status_note = f"stress-ng {label}"
-            self.run_stressng(label, args, min(slice_s, self.remaining))
+            rc = self.run_stressng(label, args, min(slice_s, self.remaining))
+            if rc in (1, 3, 4, 6, 7):
+                stressors.remove((label, args))
             i += 1
 
 
@@ -147,12 +163,15 @@ class MemoryPhase(Phase):
         if have("stressapptest"):
             run_stressapptest(self, "stressapptest", sat_seconds, mem_budget_mib(0.92),
                               extra=["-W", "-i", "2", "--pause_delay", "900", "--pause_duration", "15"])
+        else:
+            self.ctx.findings.add("sat-missing", WARN, "Test", "stressapptest is unavailable", incomplete=True)
         if self.stopped():
             return
-        workers = max(1, min(cpu_count(), 16))
-        per_worker = max(64, mem_budget_mib(0.85) // workers)
+        budget = mem_budget_mib(0.85)
+        workers = max(1, min(cpu_count(), 16, budget // 64))
         self.ctx.status_note = "stress-ng vm (all patterns)"
-        self.run_stressng("vm", ["--vm", str(workers), "--vm-bytes", f"{per_worker}M", "--vm-method", "all",
+        # stress-ng divides vm-bytes among workers internally.
+        self.run_stressng("vm", ["--vm", str(workers), "--vm-bytes", f"{budget}M", "--vm-method", "all",
                                  "--vm-keep"], self.remaining)
 
 
@@ -172,6 +191,9 @@ def run_stressapptest(phase, label, seconds, mem_mib, extra=()):
         return
     proc.close()
     check_stressapptest(ctx, phase.name, rc, proc.output_tail(400_000))
+    if rc == 0 and time.monotonic() - proc.started < seconds * 0.9 and not phase.stopped():
+        ctx.findings.add(f"sat-short:{phase.name}", WARN, "Test",
+                         "stressapptest ended before its allotted test time", incomplete=True)
 
 
 def check_stressapptest(ctx, phase_name, rc, output):
@@ -181,15 +203,15 @@ def check_stressapptest(ctx, phase_name, rc, output):
         incidents = int(m.group(1))
     errors = [l.strip() for l in output.splitlines()
               if re.search(r"Hardware Error|Report Error|miscompare|Error: .*(?:DIMM|CPU)|Status: FAIL", l)]
-    if incidents or "Status: FAIL" in output:
+    if incidents or errors or "Status: FAIL" in output:
         ctx.findings.add(f"sat-fail:{phase_name}", FAIL, "Memory",
                          f"stressapptest found {incidents or 'some'} memory/CPU data errors",
                          detail="stressapptest (Google's server burn-in tool) detected corrupted data. "
                                 "The DIMM or CPU memory controller is unstable.",
                          recommendation=REC_MEMORY, evidence=errors[:25])
-    elif "Status: PASS" not in output:
+    elif rc != 0 or "Status: PASS" not in output:
         ctx.findings.add(f"sat-rc:{phase_name}", WARN, "Test",
-                         f"stressapptest did not report a result (exit code {rc})",
+                         f"stressapptest did not complete successfully (exit code {rc})", incomplete=True,
                          evidence=output.strip().splitlines()[-10:])
 
 
@@ -203,7 +225,7 @@ class MprimePhase(Phase):
 
     def run(self):
         if not os.access(MPRIME, os.X_OK):
-            self.ctx.findings.add("mprime-missing", INFO, "Test",
+            self.ctx.findings.add("mprime-missing", WARN, "Test",
                                   "Prime95 (mprime) not included in this image; ran extra stress-ng load instead")
             self.run_stressng("matrix-fallback", ["--matrix", "0", "--matrix-method", "all",
                                                   "--vecwide", "0"], self.remaining)
@@ -242,7 +264,10 @@ class MprimePhase(Phase):
                                   recommendation=REC_CPU_MEM, evidence=errors[:20])
         elif exited_early and time.monotonic() < self.deadline - 60 and not self.stopped():
             self.ctx.findings.add("mprime-exit", WARN, "Test", f"mprime exited early (code {rc})",
-                                  evidence=output.strip().splitlines()[-10:])
+                                  evidence=output.strip().splitlines()[-10:], incomplete=True)
+        if not errors and not passed and not self.stopped():
+            self.ctx.findings.add("mprime-unverified", WARN, "Test",
+                                  "Prime95 produced no completed FFT self-tests", incomplete=True)
         log.info("mprime: %d self-tests passed", passed)
 
 
@@ -268,10 +293,11 @@ class TransientPhase(Phase):
             time.sleep(min(0.5, max(0.0, end - time.monotonic())))
 
     def run(self):
-        workers = max(1, min(cpu_count(), 8))
+        budget = mem_budget_mib(0.4)
+        workers = max(1, min(cpu_count(), 8, budget // 64))
         # The timeout is only a safety net: SIGSTOP'ed time counts against it, so the phase ends the run itself.
         args = ["stress-ng", "--cpu", "0", "--cpu-method", "matrixprod",
-                "--vm", str(workers), "--vm-bytes", f"{max(64, mem_budget_mib(0.4) // workers)}M",
+                "--vm", str(workers), "--vm-bytes", f"{budget}M",
                 "--vm-method", "all", "--verify", "--metrics-brief", "--timeout", f"{int(self.duration) + 900}s",
                 "--temp-path", "/tmp", "--oom-avoid"]
         proc = ManagedProcess(args, self.logfile("stress-ng"))
@@ -294,6 +320,9 @@ class TransientPhase(Phase):
         finally:
             proc.send_signal(signal.SIGCONT)
         rc = proc.poll()
+        if rc is not None and self.remaining > 5 and not self.stopped():
+            self.ctx.findings.add("transient-short", WARN, "Test",
+                                  "Load transient workload exited early", incomplete=True)
         if rc is None:
             # Normal end of phase: ask stress-ng to stop and print its verification summary.
             proc.send_signal(signal.SIGINT)
@@ -327,6 +356,10 @@ class IdlePhase(Phase):
         if used:
             self.ctx.findings.add("idle-cstates", INFO, "CPU", "Idle states used during idle soak",
                                   evidence=[f"{k}: {v / 1e6:.0f} s total residency" for k, v in sorted(used.items())])
+        else:
+            self.ctx.findings.add("idle-unverified", WARN, "CPU",
+                                  "No CPU idle-state residency could be verified",
+                                  recommendation="Check firmware C-state settings and turbostat residency logs.")
 
 
 def cstate_usage():
@@ -346,21 +379,72 @@ class CombinedPhase(Phase):
     name, title = "combined", "Combined max load (CPU+RAM+disks)"
 
     def run(self):
-        iperf = None
-        if self.ctx.opts.iperf3 and have("iperf3"):
-            iperf = ManagedProcess(["iperf3", "-c", self.ctx.opts.iperf3, "-t", str(int(self.duration)),
-                                    "-P", "4", "--forceflush"], self.logfile("iperf3"))
-        run_stressapptest(self, "stressapptest", self.duration, mem_budget_mib(0.85),
-                          extra=["-W", "-C", str(max(1, cpu_count() // 2)),
-                                 "--pause_delay", "600", "--pause_duration", "10"])
-        if iperf:
-            rc = iperf.wait(time.monotonic() + 60)
-            if rc is None:
-                iperf.stop()
-            elif rc != 0:
-                self.ctx.findings.add("iperf3", WARN, "Network", f"iperf3 network load failed (exit {rc})",
-                                      evidence=iperf.output_tail(4000).splitlines()[-10:])
-            iperf.close()
+        from .disks import block_disks
+        processes = []
+        dm = self.ctx.disk_manager
+        if dm:
+            dm.pause()
+        try:
+            # Keep exercising storage after the one-time surface scans have finished.
+            for disk in block_disks(dm.exclude if dm else (self.ctx.boot_disk,)):
+                label = f"disk-{disk['name']}"
+                result_path = self.logfile(label) + ".json"
+                try:
+                    os.unlink(result_path)
+                except FileNotFoundError:
+                    pass
+                cmd = ["fio", "--readonly", "--name=combined-read", f"--filename={disk['path']}",
+                       "--allow_file_create=0", "--rw=randread", "--bs=128k", "--direct=1",
+                       "--ioengine=libaio", "--iodepth=32", "--time_based=1", "--size=100%",
+                       f"--runtime={max(1, int(self.remaining))}", "--output-format=json",
+                       f"--output={result_path}"]
+                processes.append((label, ManagedProcess(cmd, self.logfile(label)), result_path))
+            if self.ctx.opts.iperf3:
+                label = "iperf3"
+                proc = ManagedProcess(["iperf3", "-c", self.ctx.opts.iperf3, "--bidir",
+                                       "-t", str(max(1, int(self.remaining))), "-P", "4", "--json"],
+                                      self.logfile(label))
+                processes.append((label, proc, None))
+            else:
+                self.ctx.findings.add("network-not-loaded", WARN, "Network",
+                                      "No iperf3 peer configured; network ports were not load-tested",
+                                      recommendation="Set iperf3 to a test peer; qualify every production port separately.")
+            run_stressapptest(self, "stressapptest", self.remaining, mem_budget_mib(0.85),
+                              extra=["-W", "-C", str(max(1, cpu_count() // 2)),
+                                     "--pause_delay", "600", "--pause_duration", "10"])
+            for label, proc, result_path in processes:
+                rc = proc.wait(self.deadline + 120, self.ctx.abort_event)
+                if self.stopped():
+                    break
+                if result_path:
+                    data = load_json(result_path, {})
+                    jobs = data.get("jobs", [])
+                    verified = bool(jobs) and all(j.get("error") == 0 and
+                               j.get("read", {}).get("io_bytes", 0) > 0 and
+                               j.get("read", {}).get("runtime", 0) >= self.duration * 900 for j in jobs)
+                else:
+                    import json
+                    output = proc.output_tail(500_000)
+                    try:
+                        data = json.loads(output[output.index("{"):])
+                        end = data.get("end", {})
+                        verified = not data.get("error") and bool(end) and any(
+                            isinstance(v, dict) and v.get("bytes", 0) > 0 and
+                            v.get("seconds", 0) >= self.duration * 0.9 for v in end.values())
+                    except (ValueError, TypeError):
+                        verified = False
+                if rc != 0 or not verified:
+                    self.ctx.findings.add(f"combined-load:{label}", WARN, "Test",
+                                          f"Combined {label} load did not complete (exit {rc})",
+                                          evidence=proc.output_tail(4000).splitlines()[-10:], incomplete=True)
+        finally:
+            for _, proc, _ in processes:
+                if proc.poll() is None:
+                    proc.stop()
+                else:
+                    proc.close()
+            if dm:
+                dm.resume()
 
 
 class PowerCyclePhase(Phase):
@@ -374,15 +458,17 @@ class PowerCyclePhase(Phase):
     name, title = "powercycle", "Reboot / power-cycle stability"
 
     def snapshot(self):
-        from .disks import block_disks
+        from .disks import block_disks, disk_id
         from .inventory import parse_dmidecode, dimms_from_dmi
         from .util import meminfo, out
         return {
             "cpus": cpu_count(),
             "memory_mib": meminfo().get("MemTotal", 0) // 2**20,
-            "dimms": len(dimms_from_dmi(parse_dmidecode(out(["dmidecode"], timeout=120)))),
-            "disks": sorted(d["name"] for d in block_disks()),
-            "nics": sorted(os.path.basename(os.path.dirname(p)) for p in glob.glob("/sys/class/net/*/device")),
+            "dimms": sorted(f"{d['locator']}:{d['serial']}:{d['size']}" for d in
+                            dimms_from_dmi(parse_dmidecode(out(["dmidecode"], timeout=120)))),
+            "disks": sorted(f"{disk_id(d)}:{d['size']}" for d in block_disks()),
+            "nics": sorted(read_file(os.path.join(os.path.dirname(p), "address")).strip()
+                           for p in glob.glob("/sys/class/net/*/device")),
         }
 
     def compare(self, baseline, now, cycle):
@@ -439,7 +525,7 @@ TITLES = {"inventory": "Inventory & pre-checks", **{n: c.title for n, c in PHASE
           "final": "Final analysis & report"}
 DESCRIPTIONS = {
     "inventory": "Lists hardware; checks DIMMs, CPUs, PCIe links, SMART, BMC log; starts disk scans",
-    "cpu": "All cores run 22 math/vector/crypto/cache workloads, every result verified",
+    "cpu": "All cores run math/vector/crypto/cache workloads with verification where supported",
     "memory": "Fills RAM with verified data patterns: finds bad DIMMs / memory controller",
     "mprime": "Prime95 AVX torture test: detects miscalculation by unstable CPU/RAM/VRM",
     "transient": "Switches full load on/off rapidly: stresses power supply and VRMs",

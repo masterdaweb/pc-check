@@ -27,6 +27,7 @@ class Finding:
     last_seen: str = ""
     phase: str = ""
     evidence: list = dataclasses.field(default_factory=list)
+    incomplete: bool = False       # required test/evidence was not obtained
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -58,7 +59,7 @@ class Findings:
                     log.warning("ignoring malformed finding record: %r", raw)
 
     def add(self, key, severity, component, title, detail="", recommendation="",
-            evidence=None, count=1, phase=None):
+            evidence=None, count=1, phase=None, incomplete=False):
         """Record an event. count=0 only attaches evidence / ensures the finding exists."""
         now = now_iso()
         with self._lock:
@@ -68,9 +69,11 @@ class Findings:
                 existing = Finding(key=key, severity=severity, component=component, title=title,
                                    detail=detail, recommendation=recommendation, count=max(count, 1),
                                    first_seen=now, last_seen=now,
-                                   phase=phase if phase is not None else self.current_phase)
+                                   phase=phase if phase is not None else self.current_phase,
+                                   incomplete=incomplete)
                 self._items[key] = existing
             else:
+                existing.incomplete = existing.incomplete or incomplete
                 existing.count += count
                 existing.last_seen = now
                 if SEVERITY_RANK[severity] > SEVERITY_RANK[existing.severity]:
@@ -151,7 +154,7 @@ def verdict(findings, incomplete=False):
     counts = findings.counts()
     if counts[FAIL]:
         return FAIL
-    if incomplete:
+    if incomplete or any(f.incomplete for f in findings.all()):
         return "INCOMPLETE"
     if counts[WARN]:
         return "PASS WITH WARNINGS"

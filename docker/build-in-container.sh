@@ -6,8 +6,14 @@ SRC=/src
 WORK=/build/work
 OUT=/out
 VERSION="${PCCHECK_VERSION:-$(date -u +%Y.%m.%d)}"
-MPRIME_URL="${MPRIME_URL:-https://download.mersenne.ca/gimps/v30/30.19/p95v3019b20.linux64.tar.gz}"
+MPRIME_DEFAULT_URL=https://download.mersenne.ca/gimps/v30/30.19/p95v3019b20.linux64.tar.gz
+MPRIME_DEFAULT_SHA256=4ce2377e03deb4cf189523136e26401ba08f67857a128e420dd030d00cdca601
+MPRIME_URL="${MPRIME_URL:-${MPRIME_DEFAULT_URL}}"
 MPRIME_SHA256="${MPRIME_SHA256:-}"
+# The default download is pinned; a custom MPRIME_URL is checked only if MPRIME_SHA256 is given.
+if [ -z "${MPRIME_SHA256}" ] && [ "${MPRIME_URL}" = "${MPRIME_DEFAULT_URL}" ]; then
+    MPRIME_SHA256="${MPRIME_DEFAULT_SHA256}"
+fi
 
 log() { echo -e "\033[1;34m[build]\033[0m $*"; }
 
@@ -67,5 +73,8 @@ NAME="pccheck-${VERSION}-amd64.iso"
 mkdir -p "${OUT}"
 cp "${ISO}" "${OUT}/${NAME}"
 cp /build/lb-build.log "${OUT}/lb-build.log"
+# Package manifest: which Debian packages (and versions) the image contains, for source lookup.
+PKGS=$(ls -1 "${WORK}"/*.packages "${WORK}"/chroot.packages.live 2>/dev/null | head -n1 || true)
+[ -n "${PKGS}" ] && cp "${PKGS}" "${OUT}/pccheck-${VERSION}-amd64.packages"
 (cd "${OUT}" && sha256sum "${NAME}" > "${NAME}.sha256")
 log "Done: out/${NAME} ($(du -h "${OUT}/${NAME}" | cut -f1))"

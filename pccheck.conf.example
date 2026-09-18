@@ -9,6 +9,7 @@ profile = standard
 #hours = 36
 
 # Phases to skip (comma separated): cpu, memory, mprime, transient, idle, combined
+# Skipped phases make the result INCOMPLETE; they are not production acceptance passes.
 #skip =
 
 # Destructive fio write+verify on non-boot disks: 0, 1 (only disks without partitions/filesystems), force
@@ -39,5 +40,6 @@ reboot_cycles = 0
 # auto = cold power cycle through the BMC when there is one, otherwise a warm reboot
 reboot_method = auto
 
-# Optional iperf3 server to load the network during the combined phase
+# Optional iperf3 server for bidirectional load during the combined phase.
+# Without a peer, the report warns that NIC ports were not load-tested.
 #iperf3 = 10.0.0.10

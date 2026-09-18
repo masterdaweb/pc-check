@@ -231,14 +231,14 @@ def safe_name(text, maxlen=48):
     return text[:maxlen] or "unknown"
 
 
-def lower_priority():
-    """preexec_fn for stress tools: lowest CPU priority so the orchestrator and watchdog stay responsive."""
+def lower_priority(pid):
+    """Set child priority from the parent; preexec_fn can deadlock a threaded orchestrator."""
     try:
-        os.nice(19)
+        os.setpriority(os.PRIO_PROCESS, pid, 19)
     except OSError:
         pass
     try:
-        with open("/proc/self/oom_score_adj", "w") as fh:
+        with open(f"/proc/{pid}/oom_score_adj", "w") as fh:
             fh.write("500")
     except OSError:
         pass
@@ -251,13 +251,19 @@ class ManagedProcess:
         self.cmd = cmd
         self.logfile = logfile
         self._fh = open(logfile, "ab")
+        self.output_start = self._fh.tell()
         self._fh.write(f"\n### {now_iso()} $ {' '.join(cmd)}\n".encode())
         self._fh.flush()
         log.info("start: %s (log %s)", " ".join(cmd), logfile)
-        self.proc = subprocess.Popen(
-            cmd, stdout=self._fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            cwd=cwd, env=env, start_new_session=True,
-            preexec_fn=lower_priority if low_priority else None)
+        try:
+            self.proc = subprocess.Popen(
+                cmd, stdout=self._fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                cwd=cwd, env=env, start_new_session=True)
+        except Exception:
+            self._fh.close()
+            raise
+        if low_priority:
+            lower_priority(self.proc.pid)
         self.started = time.monotonic()
         self.stopped_by_us = False
 
@@ -317,7 +323,8 @@ class ManagedProcess:
             with open(self.logfile, "rb") as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
-                fh.seek(max(0, size - max_bytes))
+                # A previous invocation's PASS must never validate this invocation.
+                fh.seek(max(self.output_start, size - max_bytes))
                 return fh.read().decode("utf-8", "replace")
         except OSError:
             return ""

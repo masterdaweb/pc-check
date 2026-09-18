@@ -11,19 +11,38 @@ from .phases import TITLES
 from .util import atomic_write, fmt_duration, now_iso, read_rotating
 
 VERDICT_EXPLANATION = {
-    "PASS": "No hardware problems detected. The machine is fit for production.",
+    "PASS": "No faults detected within the completed test coverage. This is not a guarantee against future failures.",
     "PASS WITH WARNINGS": "No failures, but review the warnings before sending this machine to production.",
-    FAIL: "Hardware problems detected. Do NOT send this machine to production until they are fixed and re-tested.",
-    "INCOMPLETE": "The test was stopped before completion; the result is not conclusive.",
+    FAIL: "A fault or instability was detected. Hold deployment, investigate the evidence, and re-test after repair.",
+    "INCOMPLETE": "Required tests or monitoring did not complete. Hold deployment and re-run with the coverage gaps resolved.",
 }
+
+
+def coverage_gaps(state, findings):
+    gaps = [f.title for f in findings.all() if f.incomplete]
+    if state.get("status") != "complete":
+        gaps.append("Session has not completed")
+    if not state.get("plan"):
+        gaps.append("Test plan is unavailable")
+    for p in state.get("plan", []):
+        status = state.get("phases", {}).get(p["name"], {}).get("status", "pending")
+        if status not in ("done", "warn", "failed"):
+            gaps.append(f"Phase {p['name']}: {status}")
+    for name in state.get("options", {}).get("skip", []):
+        gaps.append(f"Phase deliberately omitted: {name}")
+    for ident, scan in state.get("disk_scans", {}).items():
+        if not scan.get("done"):
+            gaps.append(f"Disk scan incomplete: {ident}")
+    for ident, test in state.get("selftests", {}).items():
+        if test.get("status") != "complete":
+            gaps.append(f"Drive self-test incomplete: {ident}")
+    return list(dict.fromkeys(gaps))
 
 
 def build(session_dir, incomplete=None):
     state = read_rotating(os.path.join(session_dir, "state.json"))[0] or {}
     findings = Findings(os.path.join(session_dir, "findings.json"))
-    if incomplete is None:
-        incomplete = state.get("status") == "aborted"
-    result = verdict(findings, incomplete=incomplete)
+    result = verdict(findings, incomplete=bool(incomplete) or bool(coverage_gaps(state, findings)))
     return state, findings, result
 
 
@@ -47,6 +66,8 @@ def render_text(state, findings, result, width=100):
     lines += [bar, f"{BRAND.upper()} - PC-CHECK HARDWARE BURN-IN REPORT  (v{__version__})".center(width), bar]
     lines.append(f"RESULT: {result}")
     lines.append(textwrap.fill(VERDICT_EXPLANATION.get(result, ""), width))
+    for gap in coverage_gaps(state, findings):
+        lines.append(f"Coverage gap: {gap}")
     lines.append("")
     lines.append(f"System   : {ident.get('system_manufacturer', '')} {ident.get('system_product', '')}  "
                  f"SN {ident.get('display_serial', '')}")
@@ -147,6 +168,10 @@ def render_html(state, findings, result):
                  f"<div class=muted>{e(state.get('session', ''))} · generated {e(now_iso())} · PC-Check {__version__}</div>")
     parts.append(f"<div class='card verdict' style='--c:{_color(result)};margin-top:16px'><b>{e(result)}</b>"
                  f"<div>{e(VERDICT_EXPLANATION.get(result, ''))}</div></div>")
+    gaps = coverage_gaps(state, findings)
+    if gaps:
+        parts.append("<h2>Incomplete coverage</h2><div class=card><ul>" +
+                     "".join(f"<li>{e(gap)}</li>" for gap in gaps) + "</ul></div>")
     grid = [
         ("System", f"{ident.get('system_manufacturer', '')} {ident.get('system_product', '')}"),
         ("Serial", ident.get("display_serial", "")),
@@ -238,6 +263,11 @@ def write_reports(session_dir, incomplete=None):
         "started_at": state.get("started_at"), "finished_at": state.get("finished_at"),
         "unexpected_reboots": state.get("unexpected_reboots", 0), "incidents": state.get("incidents", []),
         "phases": _phase_rows(state), "findings": [f.to_dict() for f in findings.all()],
+        "coverage_complete": not coverage_gaps(state, findings),
+        "coverage_gaps": coverage_gaps(state, findings),
+        "disk_scans": state.get("disk_scans", {}),
+        "selftests": state.get("selftests", {}),
+        "options": state.get("options", {}), "image_release": state.get("image_release", ""),
         "telemetry_peaks": state.get("telemetry_peaks", {}),
     }, indent=2, default=str))
     return result, text

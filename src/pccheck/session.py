@@ -57,7 +57,12 @@ def machine_identity():
         "bios_date": _dmi("bios-release-date"),
         "mac": first_mac(),
     }
-    basis = "|".join([ident["system_uuid"], ident["system_serial"], ident["board_serial"], ident["mac"]])
+    # A missing/reordered NIC after a crash must not make this look like a new
+    # machine and hide the interrupted session. Use MAC only as a fallback.
+    basis = ("uuid:" + ident["system_uuid"] if ident["system_uuid"] else
+             "serial:" + ident["system_serial"] if ident["system_serial"] else
+             "board:" + ident["board_serial"] if ident["board_serial"] else
+             "mac:" + ident["mac"])
     ident["machine_id"] = hashlib.sha1(basis.encode()).hexdigest()[:12]
     ident["display_serial"] = (ident["system_serial"] or ident["board_serial"]
                                or ident["chassis_serial"] or ident["mac"].replace(":", "") or ident["machine_id"])

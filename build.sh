@@ -24,7 +24,8 @@ done
 
 # Docker Desktop credential helpers are often broken under WSL; public images need no auth.
 if [ -z "${DOCKER_CONFIG:-}" ] && grep -q '"credsStore"' "${HOME}/.docker/config.json" 2>/dev/null; then
-    export DOCKER_CONFIG="$(mktemp -d)"
+    DOCKER_CONFIG="$(mktemp -d)"
+    export DOCKER_CONFIG
     echo '{}' > "${DOCKER_CONFIG}/config.json"
     trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
 fi

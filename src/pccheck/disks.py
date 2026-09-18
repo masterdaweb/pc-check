@@ -1,6 +1,7 @@
 """Storage tests: SMART health, drive self-tests, full surface read scans, optional write/verify."""
 
 import json
+import glob
 import logging
 import mmap
 import os
@@ -10,7 +11,7 @@ import time
 
 from .findings import FAIL, INFO, WARN
 from .kmsg import REC_DISK
-from .util import ManagedProcess, fmt_bytes, out, run
+from .util import ManagedProcess, fmt_bytes, out, run, boot_id
 
 log = logging.getLogger("pccheck")
 
@@ -23,10 +24,12 @@ MAX_READ_ERRORS = 64
 def block_disks(exclude=()):
     """Physical block devices to test: [{name, path, size, model, serial, rotational, transport}]."""
     res = run(["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE,MODEL,SERIAL,WWN,ROTA,TRAN,RO,RM"])
+    if res.returncode != 0:
+        raise RuntimeError(f"Block device discovery failed: {res.stderr.strip()}")
     try:
         devices = json.loads(res.stdout).get("blockdevices", [])
-    except ValueError:
-        return []
+    except ValueError as exc:
+        raise RuntimeError("Block device discovery returned invalid JSON") from exc
     disks = []
     for d in devices:
         name = d.get("name", "")
@@ -52,10 +55,12 @@ def disk_id(disk):
 def smart_devices(exclude=()):
     """smartctl --scan-open also finds disks behind RAID controllers (megaraid,N / cciss,N ...)."""
     res = run(["smartctl", "--scan-open", "-j"], timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(f"SMART device discovery failed: {res.stderr.strip()}")
     try:
         devices = json.loads(res.stdout).get("devices", [])
-    except ValueError:
-        return []
+    except ValueError as exc:
+        raise RuntimeError("SMART device discovery returned invalid JSON") from exc
     result = []
     for d in devices:
         name = d.get("name", "")
@@ -150,7 +155,8 @@ def evaluate_smart(data, label, before=None, phase_note=""):
                 add(f"grew:{name}", sev, f"SMART {name.replace('_', ' ')} increased during the test ({prev} -> {value})",
                     detail="udma_crc errors point to the SATA cable/backplane" if name == "udma_crc" else "")
     # Self-test results (most recent entry)
-    ata_log = data.get("ata_smart_self_test_log", {}).get("standard", {}).get("table", [])
+    ata = data.get("ata_smart_self_test_log", {})
+    ata_log = ata.get("extended", {}).get("table") or ata.get("standard", {}).get("table", [])
     if ata_log:
         st = ata_log[0].get("status", {})
         if st.get("passed") is False:
@@ -160,14 +166,32 @@ def evaluate_smart(data, label, before=None, phase_note=""):
         result = nvme_log[0].get("self_test_result", {}).get("value", 0)
         if result in (5, 6, 7):
             add("selftest", FAIL, f"NVMe self-test failed: {nvme_log[0].get('self_test_result', {}).get('string', result)}")
+    scsi_result = data.get("scsi_self_test_0", {}).get("result", {})
+    if scsi_result.get("value") in (3, 4, 5, 6, 7):
+        add("selftest", FAIL, f"SCSI self-test failed: {scsi_result.get('string', '')}")
     return findings
 
 
 def selftest_in_progress(data):
     if data.get("ata_smart_data", {}).get("self_test", {}).get("status", {}).get("remaining_percent") is not None:
         return True
-    return "current_self_test_operation" in data.get("nvme_self_test_log", {}) and \
-        data["nvme_self_test_log"]["current_self_test_operation"].get("value", 0) != 0
+    return (data.get("nvme_self_test_log", {}).get("current_self_test_operation", {}).get("value", 0) != 0
+            or data.get("scsi_self_test_0", {}).get("self_test_in_progress", False))
+
+
+def selftest_result(data):
+    """Latest result and a log fingerprint. A historical successful test is not this run's success."""
+    ata = data.get("ata_smart_self_test_log", {})
+    table = (ata.get("extended", {}).get("table") or ata.get("standard", {}).get("table") or [])
+    if table:
+        return table[0].get("status", {}).get("passed"), table
+    table = data.get("nvme_self_test_log", {}).get("table", [])
+    if table:
+        return table[0].get("self_test_result", {}).get("value") == 0, table
+    scsi = data.get("scsi_self_test_0")
+    if scsi:
+        return scsi.get("result", {}).get("value") == 0, scsi
+    return None, None
 
 
 def is_solid_state(data):
@@ -239,6 +263,7 @@ class SurfaceScan(threading.Thread):
                 if dt > ctx.opts.slow_read_seconds:
                     self.slow_reads += 1
                 if n <= 0:
+                    self.errors.append((self.offset, "Unexpected end of device before its advertised size"))
                     break
                 self.bytes_read += n
                 self.offset += n
@@ -296,19 +321,35 @@ class DiskManager:
         self.scans = []
         self.writers = []
         self.state = ctx.session.state.setdefault("disk_scans", {})
-        self.exclude = (ctx.boot_disk,) if ctx.boot_disk else ()
+        self.selftests = ctx.session.state.setdefault("selftests", {})
+        from .storage import parent_disk
+        log_device = getattr(getattr(ctx, "storage", None), "device", "")
+        self.exclude = tuple(x for x in (ctx.boot_disk, parent_disk(log_device)) if x)
 
     # ----- SMART
     def smart_baseline(self):
         base = self.ctx.session.state.setdefault("baselines", {}).setdefault("smart", {})
-        for dev in smart_devices(self.exclude):
+        devices = smart_devices(self.exclude)
+        for disk in block_disks(self.exclude):
+            # NVMe SMART discovery commonly returns /dev/nvme0, not /dev/nvme0n1.
+            if not any(disk["path"] == dev["name"] or
+                       (disk["name"].startswith("nvme") and disk["path"].startswith(dev["name"] + "n"))
+                       for dev in devices):
+                self.ctx.findings.add(f"smart-undiscovered:{disk_id(disk)}", WARN, "Storage",
+                                      f"No SMART target discovered for {disk['name']} {disk['model']}", incomplete=True)
+        for dev in devices:
             data = smart_read(dev)
-            if not data:
+            if not data or not any(k in data for k in ("smart_status", "ata_smart_attributes",
+                                                       "nvme_smart_health_information_log", "scsi_error_counter_log")):
+                self.ctx.findings.add(f"smart-unreadable:{dev['name']}:{dev['type']}", WARN, "Storage",
+                                      f"SMART health data unavailable for {dev['name']} ({dev['type']})",
+                                      incomplete=True)
                 continue
             label = smart_label(data, dev)
             key = f"{dev['name']}|{dev['type']}"
             if key not in base:
-                base[key] = {"label": label, "metrics": smart_metrics(data), "solid_state": is_solid_state(data)}
+                base[key] = {"label": label, "metrics": smart_metrics(data), "solid_state": is_solid_state(data),
+                             "selftest_log": selftest_result(data)[1], "serial": data.get("serial_number")}
                 for f in evaluate_smart(data, label):
                     f["title"] = f["title"] + " (before test)"
                     self.ctx.findings.add(**f)
@@ -318,18 +359,31 @@ class DiskManager:
         base = self.ctx.session.state["baselines"].get("smart", {})
         for key, info in base.items():
             name, dtype = key.split("|", 1)
-            kind = "long" if long_test and info.get("solid_state") else "short"
+            kind = "long" if long_test else "short"
             res = run(["smartctl", "-d", dtype, "-t", kind, name], timeout=60)
+            # smartctl is a bitmask: bits 0..2 are command/access failures; health bits
+            # can be set even though the self-test command was accepted.
+            started = res.returncode >= 0 and not res.returncode & 7
+            self.selftests[key] = {"kind": kind, "started": started, "boot_id": boot_id(),
+                                   "status": "running" if started else "unavailable"}
+            if not started:
+                self.ctx.findings.add(f"selftest-start:{key}", WARN, "Storage",
+                                      f"SMART {kind} self-test could not start - {info['label']}", incomplete=True,
+                                      evidence=[res.stdout[-2000:], res.stderr[-1000:]])
             log.info("smart self-test %s on %s: rc=%s", kind, name, res.returncode)
+        self.ctx.session.save()
 
     def smart_final(self, wait_seconds):
-        base = self.ctx.session.state["baselines"].get("smart", {})
+        base = self.ctx.session.state.get("baselines", {}).get("smart", {})
         deadline = time.monotonic() + wait_seconds
         pending = dict(base)
         while pending and time.monotonic() < deadline and not self.ctx.abort_event.is_set():
             for key in list(pending):
                 name, dtype = key.split("|", 1)
-                if not selftest_in_progress(smart_read({"name": name, "type": dtype})):
+                data = smart_read({"name": name, "type": dtype})
+                if selftest_in_progress(data):
+                    self.selftests.setdefault(key, {})["observed_running"] = True
+                else:
                     pending.pop(key)
             if pending:
                 self.ctx.status_note = f"waiting for SMART self-tests: {', '.join(k.split('|')[0] for k in pending)}"
@@ -337,21 +391,46 @@ class DiskManager:
         for key, info in base.items():
             name, dtype = key.split("|", 1)
             data = smart_read({"name": name, "type": dtype})
+            if not data or (info.get("serial") and data.get("serial_number") != info["serial"]):
+                self.ctx.findings.add(f"smart-final-missing:{key}", WARN, "Storage",
+                                      f"Final SMART data missing or device identity changed - {info['label']}",
+                                      incomplete=True)
             with open(self.ctx.session.path("logs", f"smart-{os.path.basename(name)}-{dtype.replace(',', '_')}.json"), "w") as fh:
                 json.dump(data, fh, indent=1)
             for f in evaluate_smart(data, info["label"], before=info.get("metrics")):
                 self.ctx.findings.add(**f)
-            if key in pending:
-                self.ctx.findings.add(f"smart-selftest-unfinished:{name}", INFO, "Storage",
-                                      f"SMART self-test still running at the end of the test - {info['label']}")
+            record = self.selftests.setdefault(key, {})
+            passed, fingerprint = selftest_result(data)
+            completed = (record.get("started") and passed is True and not selftest_in_progress(data)
+                         and (fingerprint != info.get("selftest_log") or
+                              (record.get("observed_running") and record.get("boot_id") == boot_id())))
+            record["status"] = "complete" if completed else "incomplete"
+            if not completed:
+                self.ctx.findings.add(f"smart-selftest-unfinished:{key}", WARN, "Storage",
+                                      f"No completed successful self-test from this run - {info['label']}", incomplete=True)
+        self.ctx.session.save()
 
     # ----- surface scans / write verify
     def destructive_candidates(self, disks):
         eligible, skipped = [], []
         for d in disks:
-            signatures = out(["wipefs", "--no-act", "--noheadings", d["path"]]).strip()
-            children = out(["lsblk", "-lno", "NAME", d["path"]]).split()[1:]
-            if (signatures or children) and self.ctx.opts.destructive != "force":
+            signatures = run(["wipefs", "--no-act", "--noheadings", d["path"]])
+            topology = run(["lsblk", "-J", "-o", "NAME,MOUNTPOINTS", d["path"]])
+            try:
+                nodes = json.loads(topology.stdout)["blockdevices"]
+                def busy(node):
+                    return (any(node.get("mountpoints") or []) or
+                            bool(glob.glob(f"/sys/class/block/{node['name']}/holders/*")) or
+                            any(busy(c) for c in node.get("children", [])))
+                in_use = not nodes or any(busy(node) for node in nodes)
+                children = any(node.get("children") for node in nodes)
+            except (ValueError, KeyError, TypeError):
+                in_use, children = True, True
+            # force overrides existing data, never active mounts, device holders,
+            # unreadable discovery, or uncertainty about which disk booted the OS.
+            if (not self.ctx.boot_disk or d["name"] in self.exclude or in_use or
+                    signatures.returncode != 0 or topology.returncode != 0 or
+                    ((signatures.stdout.strip() or children) and self.ctx.opts.destructive != "force")):
                 skipped.append(d)
             else:
                 eligible.append(d)
@@ -368,6 +447,12 @@ class DiskManager:
             if entry.get("done"):
                 continue
             if entry["mode"] == "write-verify":
+                eligible, _ = self.destructive_candidates([disk])
+                if (not eligible or disk["name"] not in destructive_names or
+                        (getattr(self.ctx.session, "resumed", False) and not (disk.get("wwn") or disk.get("serial")))):
+                    self.ctx.findings.add(f"writeverify-unsafe:{ident}", WARN, "Storage",
+                                          f"Write/verify safety checks refused {disk['name']}", incomplete=True)
+                    continue
                 w = WriteVerify(self, disk)
                 w.start()
                 self.writers.append(w)
@@ -402,7 +487,7 @@ class DiskManager:
             for w in self.writers:
                 entry = self.state.get(disk_id(w.disk))
                 if entry is not None:
-                    entry["done"] = w.finished()
+                    entry["done"] = w.finished() and not entry.get("incomplete")
 
     def summary(self):
         rows = []
@@ -441,11 +526,14 @@ class DiskManager:
         for w in self.writers:
             if not w.finished() and w.proc:
                 w.proc.stop()
-                self.ctx.findings.add(f"writeverify-unfinished:{w.disk['name']}", INFO, "Storage",
-                                      f"Write/verify on {w.disk['name']} did not finish within the test time")
+                w.done = True  # a deliberate stop must not become a hardware failure in finished()
+                self.state[disk_id(w.disk)]["incomplete"] = True
+                self.ctx.findings.add(f"writeverify-unfinished:{w.disk['name']}", WARN, "Storage",
+                                      f"Write/verify on {w.disk['name']} did not finish within the test time",
+                                      incomplete=True)
         for s in self.scans:
             if not s.done:
-                self.ctx.findings.add(f"scan-partial:{disk_id(s.disk)}", INFO, "Storage",
+                self.ctx.findings.add(f"scan-partial:{disk_id(s.disk)}", WARN, "Storage",
                                       f"Surface read of {s.disk['name']} covered {s.progress * 100:.0f}% "
-                                      f"within the test time")
+                                      f"within the test time", incomplete=True)
         self.save_progress()

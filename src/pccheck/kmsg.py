@@ -196,13 +196,15 @@ class KmsgMonitor(threading.Thread):
         count = 1
         if rule.counter and rule.counter in ctx.sysfs_counters:
             count = 0  # the sysfs monitor owns the count; keep the text as evidence
-            if rule.counter == "edac":
+            if rule.counter == "edac" and rule.severity != FAIL:
                 return  # EDAC monitor reports per DIMM with labels; avoid a duplicate finding
             if rule.counter == "throttle":
                 key = "thermal-throttle"
         finding = ctx.findings.add(key, severity, rule.component, title, recommendation=rule.recommendation,
                                    evidence=[f"[{seconds:10.3f}] {message}"], count=count)
         threshold = {"mce-corrected": ctx.opts.mce_fail, "ghes-corrected": ctx.opts.mce_fail,
+                     "edac-ce": ctx.opts.ce_fail,
+                     "aer-corrected": ctx.opts.aer_fail if "aer" not in ctx.sysfs_counters else None,
                      "sata-link": ctx.opts.sata_link_fail}.get(rule.id)
         if threshold and severity == WARN and not key.endswith("-boot") and finding.count >= threshold:
             ctx.findings.escalate(key, FAIL)
@@ -214,6 +216,9 @@ class KmsgMonitor(threading.Thread):
             fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
         except OSError as exc:
             log.error("cannot open /dev/kmsg: %s", exc)
+            self.ctx.findings.add("kmsg-unavailable", WARN, "Test",
+                                  "Kernel hardware-error monitoring is unavailable", evidence=[str(exc)],
+                                  incomplete=True)
             return
         append_line(self.logfile, f"===== boot {boot_id()} (monitor start {time.strftime('%F %T')}) =====")
         pending = []
@@ -226,6 +231,9 @@ class KmsgMonitor(threading.Thread):
                     raw = None
                 except OSError as exc:
                     if exc.errno == errno.EPIPE:  # ring buffer overwritten; continue with next record
+                        self.ctx.findings.add("kmsg-overrun", WARN, "Test",
+                                              "Kernel log overflowed; hardware error messages may be missing",
+                                              incomplete=True)
                         continue
                     log.error("kmsg read error: %s", exc)
                     time.sleep(1)
@@ -263,6 +271,10 @@ class KmsgMonitor(threading.Thread):
                         state["last_seq"] = last_seq
                 if raw is None:
                     time.sleep(0.25)
+            if pending:
+                out_fh.write("\n".join(pending) + "\n")
+                out_fh.flush()
+                os.fsync(out_fh.fileno())
         os.close(fd)
 
     def stop(self):

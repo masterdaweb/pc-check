@@ -23,6 +23,7 @@ class Monitor(threading.Thread):
         self.ctx = ctx
         self.stop_event = threading.Event()
         self.last_error = None
+        self.poll_lock = threading.Lock()
 
     def available(self):
         return True
@@ -32,13 +33,20 @@ class Monitor(threading.Thread):
 
     def run(self):
         while not self.stop_event.is_set():
+            self.sample()
+            self.stop_event.wait(self.interval)
+
+    def sample(self):
+        with self.poll_lock:
             try:
                 self.poll()
             except Exception as exc:  # a monitor must never take down the test
                 if str(exc) != self.last_error:
                     log.exception("%s poll failed", self.name)
                     self.last_error = str(exc)
-            self.stop_event.wait(self.interval)
+                    self.ctx.findings.add(f"monitor-error:{self.name}", WARN, "Test",
+                                          f"Hardware monitor {self.name} lost coverage", incomplete=True,
+                                          evidence=[str(exc)])
 
     def stop(self):
         self.stop_event.set()
@@ -60,8 +68,14 @@ def edac_counts(root="/sys/devices/system/edac/mc"):
             ce = read_int(os.path.join(dimm, "dimm_ce_count"), 0)
             ue = read_int(os.path.join(dimm, "dimm_ue_count"), 0)
             result[f"{mcname}/{os.path.basename(dimm)}"] = (label, ce, ue)
-        ce = read_int(os.path.join(mc, "ce_noinfo_count"), 0)
-        ue = read_int(os.path.join(mc, "ue_noinfo_count"), 0)
+        # Some EDAC drivers expose only controller/csrow totals. Account for
+        # errors missing from DIMM counters before relying on this monitor.
+        dimm_ce = sum(v[1] for k, v in result.items() if k.startswith(mcname + "/"))
+        dimm_ue = sum(v[2] for k, v in result.items() if k.startswith(mcname + "/"))
+        ce = max(read_int(os.path.join(mc, "ce_noinfo_count"), 0),
+                 read_int(os.path.join(mc, "ce_count"), 0) - dimm_ce)
+        ue = max(read_int(os.path.join(mc, "ue_noinfo_count"), 0),
+                 read_int(os.path.join(mc, "ue_count"), 0) - dimm_ue)
         result[f"{mcname}/noinfo"] = (f"{mcname} (DIMM unknown)", ce, ue)
     return result
 
@@ -231,12 +245,12 @@ class SensorMonitor(Monitor):
 
     def poll(self):
         res = run(["sensors", "-j"], timeout=30)
-        if not res.stdout.strip():
-            return
+        if res.returncode != 0 or not res.stdout.strip():
+            raise RuntimeError("sensors did not return telemetry")
         try:
             data = json.loads(res.stdout)
-        except ValueError:
-            return
+        except ValueError as exc:
+            raise RuntimeError("Invalid sensors JSON") from exc
         current = {}
         opts = self.ctx.opts
         for r in parse_sensors_json(data):
@@ -253,6 +267,7 @@ class SensorMonitor(Monitor):
                 self.ctx.findings.add(f"temp-crit:{name}", FAIL, "Thermal", f"Critical temperature on {name}",
                                       recommendation=REC_THERMAL,
                                       evidence=[f"{now_iso()} {r['value']:.0f}C (crit {crit:.0f}C) phase {self.ctx.findings.current_phase}"])
+                self.ctx.request_abort(f"Critical temperature on {name}")
             elif (high and r["value"] >= high) or (
                     not high and not crit and group == "cpu" and r["value"] >= opts.cpu_temp_warn) or (
                     not high and not crit and group == "drive" and r["value"] >= opts.drive_temp_warn):
@@ -261,6 +276,8 @@ class SensorMonitor(Monitor):
                                       recommendation=REC_THERMAL,
                                       evidence=[f"{now_iso()} {r['value']:.0f}C (limit {limit:.0f}C) phase {self.ctx.findings.current_phase}"])
         self.current = current
+        if not current:
+            self.ctx.findings.add("sensors-empty", WARN, "Thermal", "No usable temperature sensors reported")
 
 
 # --------------------------------------------------------------------------- IPMI (BMC)
@@ -315,6 +332,8 @@ class IpmiMonitor(Monitor):
 
     def sel_lines(self):
         res = run(["ipmitool", "sel", "elist"], timeout=180)
+        if res.returncode != 0:
+            raise RuntimeError(f"Cannot read BMC SEL: {res.stderr.strip()}")
         return [l.strip() for l in res.stdout.splitlines() if "|" in l]
 
     def baseline(self):
@@ -356,16 +375,21 @@ class IpmiMonitor(Monitor):
             fields = [p.strip() for p in line.split("|")]
             sensor = fields[3] if len(fields) > 3 else "event"
             event = fields[4] if len(fields) > 4 else line
-            self.ctx.findings.add(f"sel:{sensor}:{event}", sev, "BMC",
+            finding = self.ctx.findings.add(f"sel:{sensor}:{event}", sev, "BMC",
                                   f"BMC event during test: {sensor} - {event}",
                                   recommendation="Check the component named by the sensor (DIMM/CPU/PSU/fan).",
                                   evidence=[line])
+            if sev == WARN and re.search(r"Correctable.*ECC|Correctable.*memory", line, re.I):
+                if finding.count >= self.ctx.opts.ce_fail:
+                    self.ctx.findings.escalate(finding.key, FAIL)
         if new_hashes:
             with self.ctx.session.lock:
                 base.setdefault("sel_hashes", []).extend(new_hashes)
             self.ctx.session.save()
 
         res = run(["ipmitool", "sdr", "elist"], timeout=180)
+        if res.returncode != 0:
+            raise RuntimeError(f"Cannot read BMC sensors: {res.stderr.strip()}")
         for name, status, reading in parse_sdr(res.stdout):
             if status in SDR_FAIL:
                 self.ctx.findings.add(f"sdr:{name}", FAIL, "BMC", f"BMC sensor critical: {name}",

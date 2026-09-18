@@ -30,10 +30,10 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "${DOCKER_CONFIG:-}" ] && grep -q '"credsStore"' "${HOME}/.docker/config.json" 2>/dev/null; then
-    export DOCKER_CONFIG="$(mktemp -d)"; echo '{}' > "${DOCKER_CONFIG}/config.json"
+    DOCKER_CONFIG="$(mktemp -d)"; export DOCKER_CONFIG; echo '{}' > "${DOCKER_CONFIG}/config.json"
 fi
 
-WORK=out/qemu
+WORK="${QEMU_WORK_DIR:-out/qemu}"
 mkdir -p "$WORK"
 chmod 0777 "$WORK" 2>/dev/null || true
 ISO_ABS="$(readlink -f "$ISO")"

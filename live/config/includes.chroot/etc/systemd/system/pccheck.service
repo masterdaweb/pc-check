@@ -1,7 +1,7 @@
 [Unit]
 Description=Master da Web PC-Check automatic hardware burn-in
-After=systemd-udev-settle.service systemd-modules-load.service live-config.service local-fs.target
-Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service systemd-modules-load.service live-config.service local-fs.target rasdaemon.service
+Wants=systemd-udev-settle.service rasdaemon.service
 Conflicts=getty@tty1.service
 Before=getty.target
 

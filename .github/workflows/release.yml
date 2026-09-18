@@ -1,0 +1,100 @@
+# Builds the live ISO and publishes it as a GitHub release.
+#
+#   git tag v2026.09.18 && git push origin v2026.09.18
+#
+# The version stamped into the image (/etc/pccheck-release) and the ISO file name is the
+# tag without its leading "v". A manual run (workflow_dispatch) builds the ISO and keeps it
+# as a workflow artifact without publishing a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  iso:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # live-build needs ~10 GB of scratch space; the stock runner has about 14 GB free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+              version="${GITHUB_REF_NAME#v}"
+          else
+              version="$(date -u +%Y.%m.%d)-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build ISO
+        env:
+          PCCHECK_VERSION: ${{ steps.version.outputs.version }}
+        run: ./build.sh
+
+      - name: Collect release files
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          sudo cp "out/pccheck-${v}-amd64.iso" "out/pccheck-${v}-amd64.iso.sha256" dist/
+          if [ -f "out/pccheck-${v}-amd64.packages" ]; then
+              sudo cp "out/pccheck-${v}-amd64.packages" dist/
+          fi
+          sudo chown -R "$(id -u):$(id -g)" dist
+          ls -lh dist
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lb-build-log
+          path: out/lb-build.log
+          if-no-files-found: ignore
+
+      - name: Keep ISO as workflow artifact (manual runs)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pccheck-${{ steps.version.outputs.version }}
+          path: dist/
+          retention-days: 14
+          compression-level: 0
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PC-Check ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*
+          body: |
+            ## Download
+
+            `pccheck-${{ steps.version.outputs.version }}-amd64.iso` is a hybrid ISO for BIOS and UEFI.
+            Write it with `sudo ./write-usb.sh pccheck-*.iso /dev/sdX` (recommended: adds the
+            `PCCHECKDATA` log partition) or any raw image writer (dd, Etcher, Rufus in DD mode).
+
+            Verify: `sha256sum -c pccheck-${{ steps.version.outputs.version }}-amd64.iso.sha256`
+
+            The `.packages` file lists every Debian package in the image. Their sources are available
+            from the Debian archive and https://snapshot.debian.org/. The image also bundles Prime95
+            (mprime), which is freeware under the GIMPS license and not open source. See
+            [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md).

@@ -11,13 +11,14 @@ import time
 
 from . import PRODUCT, __version__, inventory, report
 from .config import build_plan, load_options
-from .disks import DiskManager, block_disks
+from .disks import DiskManager, block_disks, disk_id
 from .findings import FAIL, INFO, WARN, Findings
 from .inventory import check_pcie_links, check_taint, collect_pstore, parse_pcie_links
 from .kmsg import KmsgMonitor
 from .monitors import (AerMonitor, EdacMonitor, Heartbeat, IpmiMonitor, Monitor, NicMonitor, SensorMonitor,
                        ThrottleMonitor)
 from .phases import PHASES, TITLES
+from .ras import RasMonitor
 from .session import Session, machine_identity
 from .storage import setup_storage
 from .util import ManagedProcess, append_line, atomic_write_json, have, now_iso, out, run, fmt_duration
@@ -176,7 +177,7 @@ def start_monitors(ctx):
     sensors = SensorMonitor(ctx)
     candidates = [
         (EdacMonitor(ctx), "edac"), (AerMonitor(ctx), "aer"), (ThrottleMonitor(ctx), "throttle"),
-        (sensors, None), (IpmiMonitor(ctx), None), (NicMonitor(ctx), None),
+        (sensors, None), (IpmiMonitor(ctx), None), (NicMonitor(ctx), None), (RasMonitor(ctx), None),
     ]
     for mon, counter in candidates:
         if mon.available():
@@ -251,6 +252,9 @@ def confirm_destructive(ctx, disks):
     names = ", ".join(f"{d['name']} ({d['model']} {d['size'] // 10**9} GB)" for d in disks)
     end = time.monotonic() + ctx.opts.destructive_countdown
     while time.monotonic() < end:
+        if ctx.abort_event.is_set():
+            ctx.pending_confirmation = None
+            return False
         ctx.status_note = (f"DESTRUCTIVE write test will ERASE: {names} - starts in "
                            f"{int(end - time.monotonic())}s, press 'n' to cancel")
         if ctx.pending_confirmation.wait(1):
@@ -259,12 +263,14 @@ def confirm_destructive(ctx, disks):
             ctx.findings.add("destructive-cancelled", INFO, "Storage", "Destructive disk test cancelled by operator")
             return False
     ctx.pending_confirmation = None
-    return True
+    return not ctx.abort_event.is_set()
 
 
 def run_inventory_phase(ctx):
     ctx.status_note = "collecting inventory"
     inventory.run_inventory(ctx)
+    if ctx.opts.reboot_cycles and not ctx.session.state.get("powercycle_baseline"):
+        ctx.session.update(powercycle_baseline=PHASES["powercycle"](ctx, 0).snapshot())
     dm = ctx.disk_manager
     ctx.status_note = "reading SMART data"
     dm.smart_baseline()
@@ -274,20 +280,24 @@ def run_inventory_phase(ctx):
 def start_disk_tests(ctx):
     dm = ctx.disk_manager
     st = ctx.session.state
+    if st.get("disk_tests_finished"):
+        return
     destructive = []
     if "destructive_disks" not in st:
         chosen = []
+        identities = {}
         if ctx.opts.is_destructive:
             eligible, skipped = dm.destructive_candidates(block_disks(dm.exclude))
             for d in skipped:
                 ctx.findings.add(f"destructive-skip:{d['name']}", WARN, "Storage",
-                                 f"Destructive test skipped on {d['name']} {d['model']}: disk contains data "
-                                 f"(use pccheck.destructive=force)")
+                                 f"Destructive test skipped on {d['name']} {d['model']}: existing data, "
+                                 "active use, or incomplete safety discovery", incomplete=True)
             if eligible and confirm_destructive(ctx, eligible):
                 chosen = [d["name"] for d in eligible]
-        ctx.session.update(destructive_disks=chosen)
-    names = set(st.get("destructive_disks", []))
-    destructive = [d for d in block_disks(dm.exclude) if d["name"] in names]
+                identities = {disk_id(d): d["size"] for d in eligible}
+        ctx.session.update(destructive_disks=chosen, destructive_identities=identities)
+    identities = st.get("destructive_identities", {})
+    destructive = [d for d in block_disks(dm.exclude) if identities.get(disk_id(d)) == d["size"]]
     dm.start_scans(destructive)
 
 
@@ -330,6 +340,11 @@ def run_phases(ctx):
             s.set_phase(name, status="skipped", result="too many unexpected reboots")
             continue
         ctx.findings.current_phase = name
+        if name == "powercycle" and not s.state.get("disk_tests_finished"):
+            # Planned power cycles must not abort the drive self-tests we intend to validate.
+            finish_disk_tests(ctx)
+            if ctx.abort_event.is_set():
+                break
         start_wall = time.time()
         s.set_phase(name, status="running", started=now_iso())
         log.info("phase %s started (%s)", name, fmt_duration(p["duration"]))
@@ -343,7 +358,8 @@ def run_phases(ctx):
                 phase.run()
         except Exception as exc:
             log.exception("phase %s crashed", name)
-            ctx.findings.add(f"phase-error:{name}", WARN, "Test", f"Internal error in phase {name}: {exc}")
+            ctx.findings.add(f"phase-error:{name}", WARN, "Test", f"Internal error in phase {name}: {exc}",
+                             incomplete=True)
             s.set_phase(name, status="error", elapsed=int(time.time() - start_wall), result=str(exc)[:200])
             continue
         finally:
@@ -356,6 +372,8 @@ def run_phases(ctx):
         phase_findings = ctx.findings.by_phase(name)
         if ctx.abort_event.is_set():
             status = "aborted"
+        elif any(f.incomplete for f in phase_findings):
+            status = "error"
         elif any(f.severity == FAIL for f in phase_findings):
             status = "failed"
         elif any(f.severity == WARN for f in phase_findings):
@@ -368,9 +386,7 @@ def run_phases(ctx):
         log.info("phase %s finished: %s", name, status)
 
 
-def finalize(ctx):
-    s = ctx.session
-    ctx.findings.current_phase = "final"
+def finish_disk_tests(ctx):
     aborted = ctx.abort_event.is_set()
     dm = ctx.disk_manager
     if dm and not aborted:
@@ -379,22 +395,41 @@ def finalize(ctx):
         while not dm.all_done() and time.monotonic() < end and not ctx.abort_event.is_set():
             ctx.status_note = f"waiting for disk scans to finish (max {fmt_duration(end - time.monotonic())})"
             time.sleep(10)
+    aborted = ctx.abort_event.is_set()
     if dm:
         ctx.status_note = "stopping disk tests"
         dm.stop()
         ctx.status_note = "collecting final SMART data"
         dm.smart_final(0 if aborted else (600 if ctx.opts.profile == "quick" else 1800))
+    ctx.session.update(disk_tests_finished=True)
+
+
+def finalize(ctx):
+    s = ctx.session
+    ctx.findings.current_phase = "final"
+    if not s.state.get("disk_tests_finished"):
+        finish_disk_tests(ctx)
+    elif ctx.disk_manager:
+        ctx.disk_manager.smart_final(0)  # also check health changes introduced by planned reboot cycles
     ctx.status_note = "final hardware checks"
     for mon in ctx.monitors:
         if not isinstance(mon, Monitor):
             continue
         try:
-            mon.poll()  # last read of all counters
+            mon.sample()  # serialized with the background poll: no double counting
+            if isinstance(mon, RasMonitor):
+                mon.export()
         except Exception:
             log.exception("final poll of %s failed", mon.name)
-    links_now = parse_pcie_links(out(["lspci", "-vvv", "-nn"], timeout=120))
+            ctx.findings.add(f"monitor-final:{mon.name}", WARN, "Test",
+                             f"Final monitoring evidence unavailable: {mon.name}", incomplete=True)
+    pci_result = run(["lspci", "-vvv", "-nn"], timeout=120)
+    links_now = parse_pcie_links(pci_result.stdout)
     baseline_links = s.state.get("baselines", {}).get("pcie_links")
-    if baseline_links:
+    if pci_result.returncode != 0:
+        ctx.findings.add("pcie-final-unavailable", WARN, "Test",
+                         "Final PCIe inventory could not be read", incomplete=True)
+    elif baseline_links:
         check_pcie_links(links_now, ctx.findings, baseline=baseline_links)
     check_taint(ctx.findings, start_taint=s.state.get("baselines", {}).get("taint", 0))
     logs = s.path("logs")
@@ -409,6 +444,9 @@ def finalize(ctx):
             fh.write(run(cmd, timeout=300).stdout)
     for mon in ctx.monitors:
         mon.stop()
+    for mon in ctx.monitors:
+        mon.join(timeout=5)
+    aborted = ctx.abort_event.is_set()
     ctx.findings.flush(force=True)
     s.finish("aborted" if aborted else "complete")
     result, text = report.write_reports(s.dir, incomplete=aborted)
@@ -439,6 +477,9 @@ def main(force=False):
     ctx.storage = setup_storage()
     ctx.boot_disk = ctx.storage.boot_disk
     ctx.opts = load_options(ctx.storage.root if ctx.storage.persistent else None)
+    if not ctx.opts.auto and not force:
+        maintenance_screen()
+        return 0
     identity = machine_identity()
     plan = build_plan(ctx.opts)
     ctx.session = Session.open(ctx.storage.root, identity, ctx.opts, plan)
@@ -454,11 +495,15 @@ def main(force=False):
     log.info("%s %s session %s (resumed=%s)", PRODUCT, __version__, s.state["session"], s.resumed)
 
     ctx.findings = Findings(s.path("findings.json"))
+    for problem in ctx.opts.validation_errors:
+        ctx.findings.add(f"config:{problem}", WARN, "Test", f"Invalid test configuration: {problem}",
+                         incomplete=True)
     ctx.started_wall = time.time()
     if not ctx.storage.persistent:
         ctx.findings.add("storage-ram", WARN, "Test", "Logs are kept in RAM only",
                          detail=ctx.storage.note,
-                         recommendation="Prepare the USB stick with write-usb.sh so it has a PCCHECKDATA partition.")
+                         recommendation="Prepare the USB stick with write-usb.sh so it has a PCCHECKDATA partition.",
+                         incomplete=True)
     record_incident(ctx)
 
     from .dashboard import Dashboard, KeyReader

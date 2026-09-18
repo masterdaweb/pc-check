@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import math
 import os
 import shlex
 
@@ -56,6 +57,7 @@ class Options:
     cpu_temp_warn: float = 90.0     # used only when the sensor reports no limits
     drive_temp_warn: float = 70.0
     slow_read_seconds: float = 5.0  # a single 4 MiB read slower than this counts as a slow read
+    validation_errors: tuple = dataclasses.field(default=(), init=False)
 
     @property
     def profile_info(self):
@@ -76,7 +78,7 @@ def _bool(value):
 
 def _apply(opts, key, value, source):
     key = key.strip().lower().replace("-", "_")
-    field_types = {f.name: f.type for f in dataclasses.fields(Options)}
+    field_types = {f.name: f.type for f in dataclasses.fields(Options) if f.init}
     if key not in field_types:
         log.warning("%s: unknown option %r ignored", source, key)
         return
@@ -94,6 +96,7 @@ def _apply(opts, key, value, source):
             setattr(opts, key, str(value).strip())
     except ValueError:
         log.warning("%s: bad value for %s: %r", source, key, value)
+        opts.validation_errors += (f"Invalid {key}: {value}",)
         return
     if key == "profile" and opts.profile not in PROFILES:
         log.warning("%s: unknown profile %r, using standard", source, value)
@@ -135,6 +138,21 @@ def load_options(storage_root=None, cmdline=None):
         cmdline = read_file("/proc/cmdline")
     for key, value in parse_cmdline(cmdline).items():
         _apply(opts, key, value, "kernel cmdline")
+    defaults = Options()
+    ranges = {"hours": (0, 8760), "destructive_countdown": (0, 3600), "reboot_cycles": (0, 50),
+              "max_unexpected_reboots": (1, 50), "cpu_temp_warn": (20, 150), "drive_temp_warn": (20, 150),
+              "slow_read_seconds": (0.001, 3600)}
+    ranges.update({key: (1, 1_000_000) for key in ("ce_fail", "mce_fail", "aer_fail", "sata_link_fail")})
+    for key, (minimum, maximum) in ranges.items():
+        value = getattr(opts, key)
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            opts.validation_errors += (f"{key} must be between {minimum} and {maximum}; got {value}",)
+            setattr(opts, key, getattr(defaults, key))
+    for key, allowed in (("destructive", ("0", "1", "yes", "true", "force")),
+                         ("reboot_method", ("auto", "ipmi", "reboot"))):
+        if getattr(opts, key) not in allowed:
+            opts.validation_errors += (f"Invalid {key}: {getattr(opts, key)}",)
+            setattr(opts, key, getattr(defaults, key))
     return opts
 
 

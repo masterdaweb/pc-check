@@ -206,6 +206,11 @@ def parse_pcie_links(text):
 
 
 def check_pcie_links(links, findings, baseline=None):
+    for bdf, link in (baseline or {}).items():
+        if bdf not in links and not link["bridge"]:
+            findings.add(f"pcie-missing:{bdf}", FAIL, "PCIe",
+                         f"PCIe device disappeared during the test: {bdf} {link['name']}",
+                         recommendation=REC_PCIE)
     for bdf, l in links.items():
         if l["bridge"]:
             continue
@@ -362,6 +367,10 @@ def run_inventory(ctx):
     collect_raw(inv_dir, note)
     note("checking memory, CPUs and PCIe links")
     records = parse_dmidecode(read_file(os.path.join(inv_dir, "dmidecode.txt")))
+    if not records:
+        ctx.findings.add("inventory-missing", WARN, "Test",
+                         "SMBIOS inventory could not be read; installed components cannot be verified",
+                         incomplete=True)
     dimms = check_memory(records, ctx.findings)
     check_cpus(records, ctx.findings)
     links = parse_pcie_links(read_file(os.path.join(inv_dir, "lspci-vvv.txt")))
@@ -369,6 +378,21 @@ def run_inventory(ctx):
     check_rtc(ctx.findings)
     ctx.session.state.setdefault("baselines", {})["taint"] = check_taint(ctx.findings)
     summary = summarize(records, dimms, links)
+    if summary.get("gpus"):
+        ctx.findings.add("gpu-not-tested", WARN, "GPU",
+                         "No dedicated GPU compute or VRAM verification was performed",
+                         recommendation="Run the GPU vendor's diagnostics for any production accelerators.")
+    if not glob.glob("/sys/class/watchdog/watchdog*"):
+        ctx.findings.add("watchdog-missing", WARN, "System",
+                         "No hardware watchdog exposed; a hard hang may require an external reset",
+                         recommendation="Enable the platform watchdog or supervise through the BMC during qualification.")
+    ctx.findings.add("pre-os-memory", INFO, "Memory",
+                     "Linux workloads cannot test RAM reserved by the kernel or firmware",
+                     recommendation="Supplement with standalone Memtest86+ and vendor diagnostics.")
+    if summary.get("disks") and not ctx.opts.is_destructive:
+        ctx.findings.add("storage-read-only", INFO, "Storage",
+                         "Storage write integrity was not tested; disk tests are read-only",
+                         recommendation="On disposable disks, explicitly enable destructive write/verify before acceptance.")
     with ctx.session.lock:
         ctx.session.state["inventory"] = summary
         ctx.session.state.setdefault("baselines", {})["pcie_links"] = links
