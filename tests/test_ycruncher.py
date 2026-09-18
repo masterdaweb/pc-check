@@ -116,26 +116,42 @@ class YCruncherTest(unittest.TestCase):
         self.assertEqual(verdict(ctx.findings), "INCOMPLETE")
 
     def test_run_saves_config_result_and_reaps_child(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            os.mkdir(os.path.join(tmp, "logs"))
-            ctx = context(tmp)
-            proc = Mock(logfile=os.path.join(tmp, "logs", "ycruncher-stress.log"), output_start=0, started=0)
-            proc.wait.return_value = 0
-            with open(proc.logfile, "w") as fh:
-                fh.write(success_output())
-            with patch.object(phases.os, "access", return_value=True), \
-                 patch.object(phases.os, "sched_getaffinity", return_value={0, 2}), \
-                 patch.object(phases, "mem_budget_mib", return_value=256), \
-                 patch.object(phases, "ManagedProcess", return_value=proc) as launch:
-                phases.YCruncherPhase(ctx, 60).run()
-            proc.stop.assert_called_once()
-            self.assertIn("pause:-2", launch.call_args.args[0])
-            self.assertEqual(launch.call_args.kwargs["env"]["LD_LIBRARY_PATH"], "/opt/y-cruncher/Binaries")
-            with open(os.path.join(tmp, "logs", "ycruncher-result.json")) as fh:
-                result = json.load(fh)
-            self.assertEqual(result["requested_cores"], [0, 2])
-            self.assertEqual(result["requested_memory_mib"], 256)
-            self.assertEqual(verdict(ctx.findings), "PASS")
+        for started in (0.0, 100_000.0):
+            for elapsed, expected in ((60.0, "PASS"), (2.0, "INCOMPLETE")):
+                with self.subTest(started=started, elapsed=elapsed), tempfile.TemporaryDirectory() as tmp:
+                    os.mkdir(os.path.join(tmp, "logs"))
+                    ctx = context(tmp)
+                    clock = Mock(monotonic=Mock(return_value=started))
+                    proc = Mock(logfile=os.path.join(tmp, "logs", "ycruncher-stress.log"),
+                                output_start=0, started=started)
+
+                    def finish_wait(*args):
+                        clock.monotonic.return_value += elapsed
+                        return 0
+
+                    proc.wait.side_effect = finish_wait
+                    with open(proc.logfile, "w") as fh:
+                        fh.write(success_output())
+                    # Simulate elapsed work without depending on the runner's uptime or sleeping.
+                    # Replace this module's clock only; file persistence keeps its real clock.
+                    with patch.object(phases, "time", clock), \
+                         patch.object(phases.os, "access", return_value=True), \
+                         patch.object(phases.os, "sched_getaffinity", return_value={0, 2}), \
+                         patch.object(phases, "mem_budget_mib", return_value=256), \
+                         patch.object(phases, "ManagedProcess", return_value=proc) as launch:
+                        phases.YCruncherPhase(ctx, 60).run()
+                    proc.stop.assert_called_once()
+                    self.assertIn("pause:-2", launch.call_args.args[0])
+                    self.assertEqual(launch.call_args.kwargs["env"]["LD_LIBRARY_PATH"],
+                                     "/opt/y-cruncher/Binaries")
+                    with open(os.path.join(tmp, "logs", "ycruncher-result.json")) as fh:
+                        result = json.load(fh)
+                    self.assertEqual(result["requested_cores"], [0, 2])
+                    self.assertEqual(result["requested_memory_mib"], 256)
+                    self.assertEqual(result["requested_seconds"], 60)
+                    self.assertEqual(result["elapsed_seconds"], elapsed)
+                    self.assertEqual(verdict(ctx.findings), expected,
+                                     [f.to_dict() for f in ctx.findings.all()])
 
     def test_abort_or_wait_exception_always_reaps_child(self):
         with tempfile.TemporaryDirectory() as tmp:

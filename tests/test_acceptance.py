@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
@@ -218,7 +219,7 @@ class MonitoringTest(unittest.TestCase):
         ctx = context()
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "ras.db")
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("CREATE TABLE mc_event (id INTEGER PRIMARY KEY, err_type TEXT, err_count INT, label TEXT)")
                 db.execute("INSERT INTO mc_event VALUES (1, 'Corrected', 2, 'DIMM_A1')")
             mon = RasMonitor(ctx)
