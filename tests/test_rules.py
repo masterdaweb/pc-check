@@ -97,7 +97,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(opts.skip, ("idle", "mprime"))
         self.assertTrue(opts.is_destructive)
         names = [p["name"] for p in config.build_plan(opts)]
-        self.assertEqual(names, ["inventory", "cpu", "memory", "transient", "combined"])
+        self.assertEqual(names, ["inventory", "cpu", "memory", "ycruncher", "transient", "combined"])
 
     def test_plan_budget(self):
         opts = config.load_options(cmdline="pccheck.profile=standard")

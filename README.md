@@ -17,7 +17,7 @@ See [the implementation review and acceptance procedure](docs/HARDWARE_VALIDATIO
 | Corrected errors are invisible: ECC fixes the bit flip, the test "passes". | Watches EDAC per-DIMM counters, machine checks (MCE/CMCI), APEI/GHES, PCIe AER and the BMC event log for the whole run. By default a single corrected memory error or machine check during burn-in is a **FAIL**. |
 | Only steady full load. | Adds a **load-transient** phase (full load switched on and off from 50 ms to minutes) to stress PSU/VRM transient response, and an **idle soak** where deep C-state bugs cause "random" reboots. |
 | A reset kills the test, and nothing records it. | The session state and kernel log are synced to the USB stick continuously. When the machine resets, the next boot detects it, recovers the kernel crash log (pstore/ERST), records the last phase and temperatures, reports a **FAIL** and continues with the remaining phases. Hangs become resets through panic-on-lockup and the hardware watchdog. |
-| Workloads that don't verify results. | stress-ng with `--verify`, Google's **stressapptest** (the tool Google uses for server burn-in), and **Prime95** torture tests (FFT round-off checks). Any miscalculation is a FAIL. |
+| Workloads that don't verify results. | stress-ng with `--verify`, Google's **stressapptest** (the tool Google uses for server burn-in), **Prime95** torture tests (FFT round-off checks), and **y-cruncher** component tests. Any miscalculation is a FAIL. |
 | Configuration faults go unnoticed. | Pre-checks for DIMMs not detected, mixed DIMMs, CPUs or cores disabled, PCIe links at reduced width (and links that degrade during the test), ECC present without error reporting, existing BMC hardware events, earlier crash logs, SMART problems and a dead CMOS battery. |
 
 ## Test sequence
@@ -25,13 +25,14 @@ See [the implementation review and acceptance procedure](docs/HARDWARE_VALIDATIO
 | # | Phase | Share of time | What it tests |
 | --- | --- | --- | --- |
 | 0 | Inventory & pre-checks | a few minutes | Full hardware inventory, static checks, SMART baseline, starts drive self-tests and background disk surface scans |
-| 1 | CPU stress | 14% | 22 stress-ng stressors with result verification (FPU, AVX/vector, matrix, crypto, cache, branch, TSC…) |
-| 2 | Memory stress | 24% | stressapptest (92% of available RAM after an OS reserve, with power-spike pauses), then stress-ng VM patterns |
-| 3 | Prime95 torture | 16% | mprime blend torture test over all threads |
-| 4 | Load transients | 12% | CPU+memory load toggled with random timing (fast/medium/slow step patterns) |
-| 5 | Idle soak | 8% | Machine idle (disk scans paused) to exercise deep C-states |
-| 6 | Combined max load | 26% | stressapptest memory + CPU threads + sustained fio direct random reads (+ optional bidirectional iperf3) |
-| 7 | Reboot / power-cycle stability | optional | `reboot_cycles=N`: reboots (cold power cycle via BMC when available) N times and checks that every CPU, DIMM, disk and NIC comes back |
+| 1 | CPU stress | 12% | 22 stress-ng stressors with result verification (FPU, AVX/vector, matrix, crypto, cache, branch, TSC…) |
+| 2 | Memory stress | 20% | stressapptest (92% of available RAM after an OS reserve, with power-spike pauses), then stress-ng VM patterns |
+| 3 | Prime95 torture | 14% | mprime blend torture test over all threads |
+| 4 | y-cruncher | 12% | Six verified CPU/cache/memory transforms: SFTv4, SNT, SVT, FFTv4, N63 and VT3; memory allocated locally across assigned cores |
+| 5 | Load transients | 12% | CPU+memory load toggled with random timing (fast/medium/slow step patterns) |
+| 6 | Idle soak | 8% | Machine idle (disk scans paused) to exercise deep C-states |
+| 7 | Combined max load | 22% | stressapptest memory + CPU threads + sustained fio direct random reads (+ optional bidirectional iperf3) |
+| 8 | Reboot / power-cycle stability | optional | `reboot_cycles=N`: reboots (cold power cycle via BMC when available) N times and checks that every CPU, DIMM, disk and NIC comes back |
 | – | Final analysis | – | Checks disk scan and fresh self-test completion, SMART/PCIe changes and kernel taint, writes reports; disk tests finish before planned reboot cycles |
 
 These monitors run the whole time: kernel log (MCE, EDAC, AER, lockups, oopses, I/O errors, NVMe and SATA
@@ -68,6 +69,7 @@ Requirements: Docker (on Linux or WSL2), about 10 GB of disk, and internet acces
 ```bash
 ./build.sh              # runs unit tests, then builds out/pccheck-<date>-amd64.iso
 ./build.sh --no-mprime  # without Prime95
+./build.sh --no-ycruncher  # without y-cruncher; its scheduled coverage is INCOMPLETE
 ```
 
 The build uses Debian `live-build` inside a privileged container, with a package cache kept in the
@@ -75,6 +77,31 @@ The build uses Debian `live-build` inside a privileged container, with a package
 build time. The default download is pinned by SHA-256. Set `MPRIME_URL`/`MPRIME_SHA256` to use
 another version. Prime95 is not open source; check that its license fits your use (see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+
+The default image also includes y-cruncher **0.8.7.9547** (dynamic Linux build), downloaded
+from the author's GitHub release and pinned by SHA-256. The entire distribution, including its
+license, is retained in `/opt/y-cruncher`. A failed download or checksum stops the build.
+Custom archives require both `YCRUNCHER_URL` and `YCRUNCHER_SHA256` and must retain the same
+archive layout and compatible configuration/output format.
+
+**Commercial use:** y-cruncher's [license](https://www.numberworld.org/y-cruncher/license.html)
+permits free redistribution but directs commercial users to contact the author. Inclusion in
+PC-Check does not grant a commercial-use license. Resolve that before production qualification;
+use `--no-ycruncher` to build without it. There is no silent fallback: omitted or explicitly
+skipped y-cruncher coverage produces INCOMPLETE.
+
+The y-cruncher phase uses 85% of available RAM after reserving memory for Linux and monitoring.
+It selects the appropriate CPU binary, assigns all cores available to the orchestrator, and
+cycles cache-sized and larger memory workloads with stop-on-error enabled. Its 12% budget is
+about 1h26m / 2h53m / 8h38m in the standard / extended / burnin profiles. A pass requires the
+normal completion marker, elapsed budget, allocation evidence for each assigned core, and at
+least one successful test from each of the six algorithms. Calculation errors and crashes fail;
+missing/unsupported tests, setup errors, timeouts and early exits leave coverage INCOMPLETE.
+The existing hardware monitors remain active. This cannot isolate the faulty replaceable part.
+
+`logs/ycruncher-config.json`, `logs/ycruncher-stress.log` and `logs/ycruncher-result.json` retain
+settings, raw output, per-algorithm success counts, CPU/NUMA allocation evidence and exit status.
+Start a **new session** after upgrading the image: an existing session resumes its saved plan.
 
 Unit tests only: `python3 -m unittest discover -s tests -t .`
 
@@ -202,6 +229,7 @@ live/                           live-build configuration (packages, GRUB menu, s
 src/pccheck/                    the test orchestrator (Python, stdlib only)
   orchestrator.py               session flow, reboot detection, finalize, web server
   phases.py                     stress phases
+  ycruncher.py                  y-cruncher configuration and evidence parser
   kmsg.py                       kernel log rules
   monitors.py                   EDAC, AER, throttling, sensors, IPMI, NIC, heartbeat
   disks.py                      SMART, self-tests, surface scan, write/verify
@@ -224,6 +252,10 @@ a USB stick prepared by `write-usb.sh`, and NVMe + SATA test disks:
   stress'`), marks that phase `interrupted` and continues with the remaining phases
 - planned reboot cycles resume without being counted as crashes, and measure the boot time
 - the log partition is created automatically when the ISO is written with `dd`
+
+The y-cruncher addition also passes a targeted QEMU boot: all six algorithms complete on four
+vCPUs, and the phase's evidence appears in the saved report. See
+[validation details](docs/HARDWARE_VALIDATION.md#y-cruncher-coverage) for artifacts and limits.
 
 State is written to two alternating files and every durable write is followed by `syncfs()` plus a
 block-device flush, because on vfat a file `fsync()` alone does not flush the directory entry - a
@@ -258,4 +290,4 @@ PC-Check is free software: you can redistribute it and/or modify it under the te
 **no warranty**. A PASS verdict is a screening result, not a guarantee of hardware reliability.
 
 The ISO also bundles third-party software under its own licenses, including Debian packages and
-the freeware Prime95 (mprime). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Prime95 (mprime) and y-cruncher under their respective proprietary licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

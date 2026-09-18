@@ -3,21 +3,24 @@
 #
 #   ./build.sh                 build out/pccheck-<date>-amd64.iso
 #   ./build.sh --no-mprime     build without downloading Prime95
+#   ./build.sh --no-ycruncher  build without y-cruncher (scheduled test becomes INCOMPLETE)
 #   ./build.sh --clean-cache   drop the apt package cache volume first
 #
-# Environment overrides: PCCHECK_VERSION, MPRIME_URL, MPRIME_SHA256
+# Environment overrides: PCCHECK_VERSION, MPRIME_URL, MPRIME_SHA256, YCRUNCHER_URL, YCRUNCHER_SHA256
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
 IMAGE=pccheck-builder
 CACHE_VOLUME=pccheck-build-cache
 MPRIME_URL="${MPRIME_URL:-}"
+YCRUNCHER_URL="${YCRUNCHER_URL:-}"
 
 for arg in "$@"; do
     case "$arg" in
         --no-mprime) MPRIME_URL=none ;;
+        --no-ycruncher) YCRUNCHER_URL=none ;;
         --clean-cache) docker volume rm -f "${CACHE_VOLUME}" >/dev/null ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -45,6 +48,8 @@ docker run --rm --privileged \
     -e PCCHECK_VERSION="${PCCHECK_VERSION:-}" \
     ${MPRIME_URL:+-e MPRIME_URL="${MPRIME_URL}"} \
     -e MPRIME_SHA256="${MPRIME_SHA256:-}" \
+    -e YCRUNCHER_URL="${YCRUNCHER_URL}" \
+    -e YCRUNCHER_SHA256="${YCRUNCHER_SHA256:-}" \
     "${IMAGE}" bash /src/docker/build-in-container.sh
 
 echo "==> ISO images in ./out:"

@@ -16,15 +16,18 @@ import os
 import random
 import re
 import signal
+import tempfile
 import time
 
 from .findings import FAIL, INFO, WARN
 from .kmsg import REC_CPU_MEM, REC_MEMORY
-from .util import ManagedProcess, cpu_count, have, meminfo, read_file, load_json
+from .util import ManagedProcess, cpu_count, have, meminfo, read_file, load_json, atomic_write_json
+from . import ycruncher
 
 log = logging.getLogger("pccheck")
 
 MPRIME = "/opt/mprime/mprime"
+YCRUNCHER = "/opt/y-cruncher/y-cruncher"
 
 # stress-ng stressors that exercise distinct CPU blocks and verify their results.
 CPU_STRESSORS = [
@@ -213,6 +216,69 @@ def check_stressapptest(ctx, phase_name, rc, output):
         ctx.findings.add(f"sat-rc:{phase_name}", WARN, "Test",
                          f"stressapptest did not complete successfully (exit code {rc})", incomplete=True,
                          evidence=output.strip().splitlines()[-10:])
+
+
+class YCruncherPhase(Phase):
+    name, title = "ycruncher", "y-cruncher (verified CPU/cache/memory transforms)"
+
+    def run(self):
+        if not os.access(YCRUNCHER, os.X_OK):
+            self.ctx.findings.add("ycruncher-missing", WARN, "Test",
+                                  "y-cruncher is unavailable; its scheduled coverage is missing",
+                                  incomplete=True)
+            return
+        cores = sorted(os.sched_getaffinity(0))
+        memory = mem_budget_mib(0.85)
+        seconds = max(1, int(self.remaining))
+        config = ycruncher.configuration(cores, memory, seconds)
+        config_path = self.ctx.session.path("logs", "ycruncher-config.json")
+        atomic_write_json(config_path, config)
+        self.ctx.status_note = f"y-cruncher, {len(cores)} cores, {memory} MiB, six verified algorithms"
+        env = os.environ.copy()
+        # Upstream's launcher searches ./Binaries for its bundled TBB library.
+        # Our isolated working directory requires an absolute library search path.
+        env["LD_LIBRARY_PATH"] = os.path.join(os.path.dirname(YCRUNCHER), "Binaries")
+        # Working files must not land on a data disk or accumulate between invocations.
+        with tempfile.TemporaryDirectory(prefix="pccheck-ycruncher-") as workdir:
+            proc = ManagedProcess([YCRUNCHER, "skip-warnings", "pause:-2", "colors:0", "status:none",
+                                   "config", config_path], self.logfile("stress"), cwd=workdir, env=env)
+            try:
+                rc = proc.wait(time.monotonic() + seconds + 300, self.ctx.abort_event)
+            finally:
+                # Also reap the child on exceptions and operator/thermal aborts.
+                proc.stop(grace=10)
+            elapsed = time.monotonic() - proc.started
+            evidence = ycruncher.read_evidence(proc.logfile, proc.output_start)
+        evidence.update({"exit_code": rc, "elapsed_seconds": elapsed, "requested_seconds": seconds,
+                         "requested_memory_mib": memory, "requested_cores": cores,
+                         "requested_tests": list(ycruncher.TESTS)})
+        atomic_write_json(self.ctx.session.path("logs", "ycruncher-result.json"), evidence)
+        self.check_result(evidence, cores, seconds, elapsed, rc)
+
+    def check_result(self, evidence, cores, seconds, elapsed, rc):
+        # The launcher can translate a child signal into 128 + signal.
+        crash_signals = (signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGABRT, signal.SIGFPE)
+        crashed = any(rc in (-sig, 128 + sig) for sig in crash_signals)
+        if evidence["faults"] or (crashed and not self.stopped()):
+            self.ctx.findings.add("ycruncher-fail", FAIL, "CPU/Memory",
+                                  "y-cruncher detected a calculation failure or workload crash",
+                                  detail="The CPU/cache/memory path is unstable, or the workload has a software "
+                                         "fault. This result alone cannot identify a defective DIMM or CPU.",
+                                  recommendation=REC_CPU_MEM,
+                                  evidence=evidence["faults"] or [f"exit code {rc}", *evidence["tail"]])
+        gaps = ycruncher.coverage_gaps(evidence, cores, seconds, elapsed, rc)
+        if gaps or self.stopped():
+            self.ctx.findings.add("ycruncher-incomplete", WARN, "Test",
+                                  "y-cruncher did not complete all scheduled coverage", incomplete=True,
+                                  evidence=gaps or ["Test interrupted by an abort request"])
+        elif not evidence["faults"]:
+            self.ctx.findings.add("ycruncher-ok", INFO, "CPU/Memory",
+                                  "y-cruncher completed all six verified algorithms",
+                                  evidence=[evidence["version"],
+                                            f"{len(cores)} cores; {elapsed:.0f} seconds; "
+                                            f"allocation NUMA nodes: {evidence['allocation_nodes']}",
+                                            *[f"{tag}: {evidence['passed'][tag]} successful tests"
+                                              for tag in ycruncher.TESTS]])
 
 
 class MprimePhase(Phase):
@@ -519,7 +585,7 @@ class PowerCyclePhase(Phase):
         ctx.request_reboot(done + 1)
 
 
-PHASES = {cls.name: cls for cls in (CpuPhase, MemoryPhase, MprimePhase, TransientPhase, IdlePhase,
+PHASES = {cls.name: cls for cls in (CpuPhase, MemoryPhase, MprimePhase, YCruncherPhase, TransientPhase, IdlePhase,
                                     CombinedPhase, PowerCyclePhase)}
 TITLES = {"inventory": "Inventory & pre-checks", **{n: c.title for n, c in PHASES.items()},
           "final": "Final analysis & report"}
@@ -528,6 +594,7 @@ DESCRIPTIONS = {
     "cpu": "All cores run math/vector/crypto/cache workloads with verification where supported",
     "memory": "Fills RAM with verified data patterns: finds bad DIMMs / memory controller",
     "mprime": "Prime95 AVX torture test: detects miscalculation by unstable CPU/RAM/VRM",
+    "ycruncher": "Six verified transform algorithms stress CPU arithmetic, caches and the memory path",
     "transient": "Switches full load on/off rapidly: stresses power supply and VRMs",
     "idle": "Machine idle: deep sleep states are a common cause of random reboots",
     "combined": "CPU + RAM + disks at full load together: maximum power draw and heat",

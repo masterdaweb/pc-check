@@ -22,6 +22,10 @@ stressapptest
 memtester
 fio
 iperf3
+# y-cruncher dynamic binaries (TBB is supplied by the upstream archive)
+libatomic1
+libnuma1
+libstdc++6
 
 # Hardware error reporting / telemetry
 rasdaemon

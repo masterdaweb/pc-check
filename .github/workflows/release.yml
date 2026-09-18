@@ -95,6 +95,7 @@ jobs:
             Verify: `sha256sum -c pccheck-${{ steps.version.outputs.version }}-amd64.iso.sha256`
 
             The `.packages` file lists every Debian package in the image. Their sources are available
-            from the Debian archive and https://snapshot.debian.org/. The image also bundles Prime95
-            (mprime), which is freeware under the GIMPS license and not open source. See
+            from the Debian archive and https://snapshot.debian.org/. The image also bundles proprietary
+            Prime95 (mprime) and y-cruncher. Commercial use of y-cruncher requires contacting its
+            author; bundling does not grant a commercial-use license. See
             [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md).

@@ -15,6 +15,21 @@ if [ -z "${MPRIME_SHA256}" ] && [ "${MPRIME_URL}" = "${MPRIME_DEFAULT_URL}" ]; t
     MPRIME_SHA256="${MPRIME_DEFAULT_SHA256}"
 fi
 
+# y-cruncher: retain the entire upstream distribution, including license and library notices.
+# Free redistribution is allowed; commercial use requires contacting its author.
+# A failed download/checksum is a build error, never an implicitly reduced test suite.
+YCRUNCHER_DEFAULT_URL=https://github.com/Mysticial/y-cruncher/releases/download/v0.8.7.9547/y-cruncher.v0.8.7.9547-dynamic.tar.xz
+YCRUNCHER_DEFAULT_SHA256=bee23ee59464d71635a054bb4f6f09c06b8ef0bdc441fb70d4cd81a9bd42a7a7
+YCRUNCHER_URL="${YCRUNCHER_URL:-${YCRUNCHER_DEFAULT_URL}}"
+YCRUNCHER_SHA256="${YCRUNCHER_SHA256:-}"
+if [ -z "${YCRUNCHER_SHA256}" ] && [ "${YCRUNCHER_URL}" = "${YCRUNCHER_DEFAULT_URL}" ]; then
+    YCRUNCHER_SHA256="${YCRUNCHER_DEFAULT_SHA256}"
+fi
+if [ "${YCRUNCHER_URL}" != "none" ] && ! [[ "${YCRUNCHER_SHA256}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    echo "YCRUNCHER_SHA256 is required for a custom y-cruncher download" >&2
+    exit 1
+fi
+
 log() { echo -e "\033[1;34m[build]\033[0m $*"; }
 
 log "Preparing live-build tree (version ${VERSION})"
@@ -54,6 +69,23 @@ if [ "${MPRIME_URL}" != "none" ]; then
     else
         log "WARNING: mprime download failed; image will not include Prime95"
     fi
+fi
+
+if [ "${YCRUNCHER_URL}" != "none" ]; then
+    log "Fetching y-cruncher from ${YCRUNCHER_URL}"
+    mkdir -p /build/cache/downloads
+    YC_ARCHIVE="/build/cache/downloads/ycruncher-${YCRUNCHER_SHA256}.tar.xz"
+    if [ ! -s "${YC_ARCHIVE}" ]; then
+        curl -fL --retry 3 -o "${YC_ARCHIVE}.part" "${YCRUNCHER_URL}"
+        mv "${YC_ARCHIVE}.part" "${YC_ARCHIVE}"
+    fi
+    echo "${YCRUNCHER_SHA256}  ${YC_ARCHIVE}" | sha256sum -c -
+    mkdir -p "${INC}/opt/y-cruncher"
+    tar -xJf "${YC_ARCHIVE}" --strip-components=1 --no-same-owner -C "${INC}/opt/y-cruncher"
+    test -x "${INC}/opt/y-cruncher/y-cruncher"
+    test -f "${INC}/opt/y-cruncher/Read Me.txt"
+    printf 'URL=%s\nSHA256=%s\n' "${YCRUNCHER_URL}" "${YCRUNCHER_SHA256}" \
+        > "${INC}/opt/y-cruncher/pccheck-source.txt"
 fi
 
 cd "${WORK}"

@@ -8,9 +8,13 @@ profile = standard
 # Custom total stress time in hours (overrides the profile's duration)
 #hours = 36
 
-# Phases to skip (comma separated): cpu, memory, mprime, transient, idle, combined
+# Phases to skip (comma separated): cpu, memory, mprime, ycruncher, transient, idle, combined
 # Skipped phases make the result INCOMPLETE; they are not production acceptance passes.
 #skip =
+
+# y-cruncher runs automatically for 12% of the stress budget. Its commercial-use
+# terms require contacting the author: https://www.numberworld.org/y-cruncher/license.html
+# Build with --no-ycruncher to omit it; omitted/skipped coverage is INCOMPLETE.
 
 # Destructive fio write+verify on non-boot disks: 0, 1 (only disks without partitions/filesystems), force
 destructive = 0

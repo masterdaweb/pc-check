@@ -90,6 +90,10 @@ format changed. Keep previous reports for comparison; an old run and a new run a
   verification, exit status and division of the memory budget among workers.
 - [Google stressapptest](https://github.com/stressapptest/stressapptest): userspace memory/I/O stress
   and data verification.
+- [y-cruncher release and documentation](https://github.com/Mysticial/y-cruncher/releases/tag/v0.8.7.9547):
+  pinned Linux component stress tester; its bundled `Command Lines.txt` describes automation.
+  The configuration schema was obtained using the tester's Save Configuration command.
+  See also the [commercial-use terms](https://www.numberworld.org/y-cruncher/license.html).
 - [rasdaemon database implementation](https://github.com/mchehab/rasdaemon/blob/v0.8.3/ras-record.c):
   recorded hardware event schemas used by the monitor.
 - [smartctl manual](https://manpages.debian.org/trixie/smartmontools/smartctl.8.en.html):
@@ -101,7 +105,7 @@ format changed. Keep previous reports for comparison; an old run and a new run a
 - [Python subprocess documentation](https://docs.python.org/3/library/subprocess.html):
   preexec_fn is unsafe with threads.
 
-## Validation performed for this revision
+## Validation performed before adding y-cruncher
 
 - 62 unit/regression tests pass, including missing evidence, stale PASS output, memory budgeting,
   corrected/uncorrected error handling, self-test freshness, destructive-target protection and
@@ -125,3 +129,45 @@ Local artifacts: `out/pccheck-2026.09.18-amd64.iso`, its `.sha256` manifest,
 The final VM hardware report intentionally says FAIL because a reset was injected; the validation
 record confirms the expected behavior. No 24–72 hour physical-server qualification was performed
 in this development session.
+
+## y-cruncher coverage
+
+The new `ycruncher` phase runs automatically for 12% of each profile's stress budget. It uses
+SFTv4, SNT, SVT, FFTv4, N63 and VT3, with verified results, local memory allocation for each
+assigned logical core, stop-on-error, and explicit duration/memory limits. The other phases
+remain in the plan. These time allocations are fleet screening policy, not a certification.
+
+The report requires per-algorithm success, allocation evidence for every assigned core, normal
+completion and sufficient elapsed time. Calculation failures and crashes produce FAIL; absent
+binaries, unsupported algorithms, setup errors, timeout, abort and early exit produce INCOMPLETE.
+The parser reads the whole current invocation so an earlier error or an old PASS cannot be lost
+or reused. Raw output, configuration and structured results remain in the session's `logs/`.
+Memory/CPU failures still need correlation with ECC/MCE/BMC evidence to isolate a component.
+
+The default archive is 0.8.7.9547 dynamic Linux, obtained from the author's GitHub release with
+SHA-256 `bee23ee59464d71635a054bb4f6f09c06b8ef0bdc441fb70d4cd81a9bd42a7a7`, matching the release
+asset's published digest. The full distribution and its notices are retained. Downloads must
+pass checksum validation; custom URLs require an explicit SHA-256. Build with `--no-ycruncher`
+to omit it. Its commercial-use terms must be resolved with the author before commercial use.
+
+Validation for this addition:
+
+- 79 unit/regression tests pass, including 17 y-cruncher tests for missing algorithms/cores,
+  stale success output, errors early in long logs, setup failures, signals, timeout/abort,
+  process cleanup and time-budget preservation. These tests do not run stress workloads.
+- A separate real-binary wrapper smoke test completed all six algorithms using only two cores
+  and 256 MiB for about 32 seconds. It caught and verified the fix for the bundled TBB library
+  search path when running from an isolated working directory.
+- Build-script syntax and ShellCheck checks pass. A custom download without a SHA-256 is rejected
+  before network/build work begins.
+- The updated ISO builds and its SHA-256 verifies. Every Python module extracted from its
+  squashfs matches the final source; the pinned upstream archive provenance and license are present.
+- A targeted QEMU/KVM boot starts y-cruncher automatically on four vCPUs with 2333 MiB allocated.
+  The phase finishes in 94 seconds, records all six algorithms successfully (11 successful tests
+  total), and appears as `done` with zero phase warnings/failures in the saved report. The overall
+  verdict correctly remains INCOMPLETE because other stress phases were deliberately skipped.
+
+Addition artifacts: `out/pccheck-2026.09.18-ycruncher-amd64.iso`, its `.sha256` manifest,
+and `out/qemu-ycruncher/{report.json,validation.json,ycruncher-result.json,ycruncher-stress.log}`.
+These are integration checks; long physical-server, multi-socket/NUMA and fault-injection
+qualification remains necessary before fleet rollout.

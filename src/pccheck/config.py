@@ -13,12 +13,13 @@ log = logging.getLogger("pccheck")
 # Relative share of the profile's time budget per stress phase. Inventory and the
 # final analysis are not part of the budget; disk surface scans run in the background.
 PHASE_WEIGHTS = [
-    ("cpu", 0.14),        # stress-ng CPU stressors with result verification
-    ("memory", 0.24),     # stressapptest + stress-ng VM patterns
-    ("mprime", 0.16),     # Prime95 torture test (FFT verification)
+    ("cpu", 0.12),        # stress-ng CPU stressors with result verification
+    ("memory", 0.20),     # stressapptest + stress-ng VM patterns
+    ("mprime", 0.14),     # Prime95 torture test (FFT verification)
+    ("ycruncher", 0.12),  # verified transforms: CPU/cache/memory path
     ("transient", 0.12),  # rapid load on/off switching (PSU/VRM/C-state transitions)
     ("idle", 0.08),       # deep idle soak (C-state related freezes/reboots)
-    ("combined", 0.26),   # everything at once: max power draw and heat
+    ("combined", 0.22),   # everything at once: max power draw and heat
 ]
 
 PROFILES = {

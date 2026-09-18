@@ -10,7 +10,7 @@ RUN sed -i 's/Components: main/Components: main contrib non-free non-free-firmwa
  && apt-get install -y --no-install-recommends \
       live-build debootstrap xorriso squashfs-tools mtools dosfstools \
       grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed \
-      memtest86+ cpio zstd curl ca-certificates python3 rsync fdisk \
+      memtest86+ cpio zstd xz-utils curl ca-certificates python3 rsync fdisk \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

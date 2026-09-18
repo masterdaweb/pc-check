@@ -30,3 +30,20 @@ and cJSON (MIT); see `/opt/mprime/readme.txt`.
 
 PC-Check uses mprime only in torture-test mode and never connects to PrimeNet. To build an image
 without it, run `./build.sh --no-mprime`.
+
+## y-cruncher
+
+The default ISO includes y-cruncher 0.8.7.9547 by Alexander J. Yee under `/opt/y-cruncher`.
+It is proprietary software, not covered by PC-Check's GPL. The complete upstream archive is
+retained, including `Read Me.txt`, `Command Lines.txt` and `Binaries/Libraries.txt` (third-party
+library notices). Download provenance and SHA-256 are in `pccheck-source.txt` in that directory.
+
+The [upstream license](https://www.numberworld.org/y-cruncher/license.html) permits mirroring
+and distributing the software free of charge. It permits free non-commercial and academic use,
+and directs commercial users to contact the developer at `a-yee@u.northwestern.edu` for terms.
+Bundling the software does not grant permission for commercial hardware qualification. Resolve
+commercial-use terms with the author before deploying it for that purpose.
+
+PC-Check runs the component stress tester locally, without contacting an external service or
+writing digits/swap files to the disks under test. Build with `./build.sh --no-ycruncher` to omit
+it. A missing scheduled test is reported as INCOMPLETE, not replaced with an assumed equivalent.

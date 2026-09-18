@@ -67,7 +67,8 @@ RULES = [
          FAIL, "Platform", "Unexpected hardware NMI", REC_CPU_MEM),
     Rule("lockup", r"soft lockup - CPU#|hard LOCKUP|rcu_(?:sched|preempt) (?:self-)?detected stall|rcu: INFO: \S+ (?:self-)?detected stall",
          FAIL, "CPU", "CPU lockup / RCU stall (a CPU stopped responding)", REC_CPU_MEM),
-    Rule("stress-crash", r"(?:stress-ng|stressapptest|mprime)\S*\[\d+\]:? (?:segfault|general protection|trap)",
+    Rule("stress-crash", r"(?:(?:stress-ng|stressapptest|mprime|y-cruncher)\S*|\d{2}-[A-Z0-9]{3} ~ [^\[]+)"
+                        r"\[\d+\]:? (?:segfault|general protection|trap)",
          FAIL, "CPU/Memory", "Stress test process crashed (segfault / illegal instruction)", REC_CPU_MEM),
     Rule("segfault", r"\bsegfault at [0-9a-f]+ ip |traps: \S+\[\d+\] (?:general protection|trap)", WARN, "CPU/Memory",
          "Unexpected process crash (segfault)", REC_CPU_MEM),
